@@ -5683,13 +5683,14 @@ local renderState = {
 -- [[ OPTIMIZATION SETTINGS ]]
 local OPTIMIZATION = {
     UPDATE_INTERVAL = 1/60, -- Обновлять некоторые вещи 60 раз в секунду
-    HITBOX_UPDATE_INTERVAL = 1/30, -- Хитбоксы 30 раз в секунду
-    COLOR_CHECK_INTERVAL = 0.1, -- Проверка цвета 10 раз в секунду
-    VIEWMODEL_UPDATE_INTERVAL = 0.1,
-    ESP_UPDATE_INTERVAL = 1/20,
-    KEYBINDS_UPDATE_INTERVAL = 0.15,
-    ARROWS_UPDATE_INTERVAL = 1/30,
-    ANTIFLING_UPDATE_INTERVAL = 0.25,
+    HITBOX_UPDATE_INTERVAL = 1/15, -- Хитбоксы 15 раз в секунду (более агрессивно)
+    COLOR_CHECK_INTERVAL = 0.5, -- Проверка цвета 2 раза в секунду
+    VIEWMODEL_UPDATE_INTERVAL = 0.3, -- Вьюмодель 3 раза в секунду
+    ESP_UPDATE_INTERVAL = 0.3, -- ESP 3 раза в секунду (КЛЮЧЕВОЕ для FPS)
+    KEYBINDS_UPDATE_INTERVAL = 0.25, -- Кейбинды 4 раза в секунду
+    ARROWS_UPDATE_INTERVAL = 0.3, -- Стрелки 3 раза в секунду
+    ANTIFLING_UPDATE_INTERVAL = 0.5, -- Антифлинг 2 раза в секунду
+    MARKERS_UPDATE_INTERVAL = 0.25, -- Friend markers и Target ESP
 }
 
 local lastHitboxUpdate = 0
@@ -5699,6 +5700,7 @@ local lastEspUpdate = 0
 local lastKeybindUpdate = 0
 local lastArrowsUpdate = 0
 local lastAntiFlingUpdate = 0
+local lastMarkersUpdate = 0
 
 -- Вспомогательные функции для уменьшения локальных переменных в RenderStepped
 local function updateGUIVisibility()
