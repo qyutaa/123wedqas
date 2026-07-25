@@ -15,6 +15,9 @@ getgenv().aim_settings = {
     ignore_team = false,
     target_esp = false,
     target_esp_mode = "Crosshair",
+    target_esp_rotation_speed = 60,
+    target_esp_pulse = 0.06,
+    target_esp_pulse_speed = 2,
     target_hud = false,
     esp_enabled = false,
     esp_self = false,
@@ -46,7 +49,6 @@ getgenv().aim_settings = {
     click_action_key = Enum.KeyCode.LeftControl,
     running = true,
     speed_display = false,
-    esp_chams = false,
     fullbright = false,
     always_day = false,
     world_tweaks_enabled = false,
@@ -185,6 +187,7 @@ local function tw(o, p, t) return G.TS:Create(o, TweenInfo.new(t or 0.25, Enum.E
 -- [[ GLOBAL STATE ]]
 local State = {
     LockedTarget = nil,
+    targetEsp = {container = nil, rotation = 0},
     lastAimbotCFrame = nil,
     chinaHat = nil,
     chinaHatLayers = {},
@@ -231,6 +234,7 @@ local State = {
         pingAnimProgress = 1
     },
     keybindItems = {},
+    keybindSignature = nil,
     playerVisualsActive = false,
     persistentPlayerEspActive = false,
     playerEspRegistry = {},
@@ -354,6 +358,14 @@ local State = {
         lastFrame = nil
     }
 }
+
+-- Blacklist объявлен устаревшим; Exclude есть не во всех сборках,
+-- поэтому берём его через pcall с откатом на старое имя.
+local RAYCAST_EXCLUDE = (function()
+    local ok, value = pcall(function() return Enum.RaycastFilterType.Exclude end)
+    if ok and value then return value end
+    return Enum.RaycastFilterType.Blacklist
+end)()
 
 -- Utility function (нужна для IJ)
 local function getClientColor() return getgenv().aim_settings.client_color end
@@ -508,7 +520,6 @@ local function IJ_I()
     
     hm.Died:Connect(function()
         IJ_CP()
-        if fallSpeedLimiter then fallSpeedLimiter:Disconnect() end
     end)
 
 end
@@ -564,7 +575,7 @@ Movement.Spider = {
                 for _, d in ipairs({Vector3.new(1,0,0), Vector3.new(-1,0,0), Vector3.new(0,0,1), Vector3.new(0,0,-1)}) do
                     State.spider.rp = RaycastParams.new()
                     State.spider.rp.FilterDescendantsInstances = {State.spider.ch}
-                    State.spider.rp.FilterType = Enum.RaycastFilterType.Blacklist
+                    State.spider.rp.FilterType = RAYCAST_EXCLUDE
                     if workspace:Raycast(State.spider.hr.Position, d * 3, State.spider.rp) then
                         State.spider.wd = true
                         break
@@ -752,7 +763,7 @@ Movement.SafeWalk = {
                 
                 local rayParams = RaycastParams.new()
                 rayParams.FilterDescendantsInstances = {State.safeWalk.ch}
-                rayParams.FilterType = Enum.RaycastFilterType.Blacklist
+                rayParams.FilterType = RAYCAST_EXCLUDE
                 rayParams.IgnoreWater = false
                 
                 local rayResult = workspace:Raycast(rayOrigin, rayDirection, rayParams)
@@ -1096,12 +1107,13 @@ local function makeHttpRequest(method, url, headers, body)
         end
     end)
     
-    if success and result.Success then
+    -- result может быть nil (неизвестный метод) — без проверки типа тут было
+    -- "attempt to index nil value".
+    if success and type(result) == "table" and result.Success then
         return result.Body
-    else
-        warn("HTTP Request failed:", result)
-        return nil
     end
+    warn("HTTP Request failed:", tostring(result))
+    return nil
 end
 
 -- Кэш для сообщений
@@ -1196,6 +1208,52 @@ local function sendMessage(message)
 end
 
 -- Target ESP будет создаваться динамически на игроке через BillboardGui
+
+-- [[ HUD DRAG ]] Универсальное перетаскивание HUD-элементов.
+-- Двигать можно только при открытом ClickGui, чтобы не таскать HUD случайно в бою.
+local function makeHudDraggable(gui)
+    if not gui then return end
+    gui.Active = true
+
+    local dragging = false
+    local dragStart = nil
+    local startPos = nil
+
+    gui.InputBegan:Connect(function(input)
+        if input.UserInputType ~= Enum.UserInputType.MouseButton1
+            and input.UserInputType ~= Enum.UserInputType.Touch then
+            return
+        end
+        if panelAnimationState ~= "showing" and panelAnimationState ~= "visible" then
+            return
+        end
+        dragging = true
+        dragStart = input.Position
+        startPos = gui.Position
+    end)
+
+    gui.InputChanged:Connect(function(input)
+        if not dragging then return end
+        if input.UserInputType ~= Enum.UserInputType.MouseMovement
+            and input.UserInputType ~= Enum.UserInputType.Touch then
+            return
+        end
+        local delta = input.Position - dragStart
+        gui.Position = UDim2.new(
+            startPos.X.Scale,
+            startPos.X.Offset + delta.X,
+            startPos.Y.Scale,
+            startPos.Y.Offset + delta.Y
+        )
+    end)
+
+    G.UIS.InputEnded:Connect(function(input)
+        if input.UserInputType == Enum.UserInputType.MouseButton1
+            or input.UserInputType == Enum.UserInputType.Touch then
+            dragging = false
+        end
+    end)
+end
 
 -- Speed Display Label (в HudScreenGui) - показывает скорость цели
 local SpeedLabel = Instance.new("TextLabel", HudScreenGui)
@@ -1538,8 +1596,8 @@ local hpBarFillCorner = Instance.new("UICorner", HPBarFill)
 hpBarFillCorner.CornerRadius = UDim.new(0, 3)
 
 -- HP Bar Gradient (будет использовать цвета клиента)
-local HPBarGradient = Instance.new("UIGradient", HPBarFill)
-local function updateHPBarGradient()
+HPBarGradient = Instance.new("UIGradient", HPBarFill)
+function updateHPBarGradient()
     local clientColor = getClientColor()
     HPBarGradient.Color = ColorSequence.new({
         ColorSequenceKeypoint.new(0, clientColor),
@@ -1567,6 +1625,12 @@ ArrowsContainer.Name = "ArrowsContainer"
 ArrowsContainer.Size = UDim2.new(1, 0, 1, 0)
 ArrowsContainer.BackgroundTransparency = 1
 ArrowsContainer.Visible = false
+
+-- Делаем HUD-элементы перетаскиваемыми
+makeHudDraggable(WatermarkFrame)
+makeHudDraggable(KeybindList)
+makeHudDraggable(SpeedLabel)
+makeHudDraggable(PlayerInfoLabel)
 
 local animationStep = 60
 local targetAnimationStep = 60
@@ -2460,7 +2524,7 @@ local function hasLineOfSight(targetPart)
     end
     
     local raycastParams = RaycastParams.new()
-    raycastParams.FilterType = Enum.RaycastFilterType.Blacklist
+    raycastParams.FilterType = RAYCAST_EXCLUDE
     local ignoreList = {G.Cam}
     if G.LP.Character then
         table.insert(ignoreList, G.LP.Character)
@@ -3112,12 +3176,6 @@ local function updateHitboxes()
                     head.Massless = true
                     head.CanTouch = true
                     head.CanQuery = true
-                    
-                    -- TouchInterest для регистрации урона внутри хитбокса
-                    if not head:FindFirstChild("TouchInterest") then
-                        local touch = Instance.new("TouchTransmitter")
-                        touch.Parent = head
-                    end
                 end)
             elseif partName == "Body" and v.Character:FindFirstChild("HumanoidRootPart") then
                 pcall(function()
@@ -3129,12 +3187,6 @@ local function updateHitboxes()
                     hrp.CanCollide = false
                     hrp.CanTouch = true
                     hrp.CanQuery = true
-                    
-                    -- TouchInterest для регистрации урона внутри хитбокса
-                    if not hrp:FindFirstChild("TouchInterest") then
-                        local touch = Instance.new("TouchTransmitter")
-                        touch.Parent = hrp
-                    end
                 end)
             end
         end
@@ -4288,7 +4340,7 @@ function CategoryPanel:addButton(name, callback)
     
     btn.MouseButton1Click:Connect(function()
         tw(btn, {BackgroundColor3 = getClientColor()}, 0.1)
-        wait(0.1)
+        task.wait(0.1)
         tw(btn, {BackgroundColor3 = THEME.MODULE_BG}, 0.1)
         if callback then
             callback()
@@ -4310,7 +4362,7 @@ local panelW = 200
 local gap = 12
 
 -- Переменные для анимации панелей
-local panelAnimationState = "hidden" -- "hidden", "showing", "visible", "hiding"
+panelAnimationState = "hidden" -- "hidden", "showing", "visible", "hiding"
 local panelAnimationProgress = 0
 local panelOriginalPositions = {}
 local panelTargetPositions = {}
@@ -4561,6 +4613,9 @@ pVisuals:addBoolean(mESP, "Hide Team", "esp_hide_team")
 pVisuals:addBoolean(mESP, "Team Color", "esp_team_color")
 local mTargetESP = pVisuals:addModule("Target ESP", "target_esp", true)
 pVisuals:addDropdown(mTargetESP, "Mode", "target_esp_mode", {"Crosshair", "Circle"})
+pVisuals:addSlider(mTargetESP, "Rotation Speed", "target_esp_rotation_speed", 0, 360, 5)
+pVisuals:addSlider(mTargetESP, "Pulse", "target_esp_pulse", 0, 0.3, 0.01)
+pVisuals:addSlider(mTargetESP, "Pulse Speed", "target_esp_pulse_speed", 0.5, 8, 0.1)
 pVisuals:addModule("Target HUD", "target_hud", false)
 pVisuals:addModule("Friend Markers", "friend_markers", false)
     local mArrows = pVisuals:addModule("Arrows", "arrows", true)
@@ -4758,9 +4813,7 @@ local function snapshotConfigData()
     local serializedData = {}
     
     -- Отладочный вывод текущих hotkeys перед сохранением
-    print("[Config Save] Current hotkeys in aim_settings:")
     for k, v in pairs(getgenv().aim_settings.hotkeys or {}) do
-        print("  -", k, ":", typeof(v), tostring(v))
     end
     
     for key, value in pairs(getgenv().aim_settings) do
@@ -4773,16 +4826,12 @@ local function snapshotConfigData()
     
     -- Отладочный вывод hotkeys после сериализации
     if serializedData.hotkeys then
-        print("[Config Save] Hotkeys after serialization:")
         for k, v in pairs(serializedData.hotkeys) do
             if type(v) == "table" then
-                print("  -", k, ":", v.__type or "table", "enumType:", v.enumType, "name:", v.name)
             else
-                print("  -", k, ":", type(v), tostring(v))
             end
         end
     else
-        print("[Config Save] WARNING: No hotkeys in serializedData!")
     end
     
     return runtimeData, serializedData
@@ -5041,68 +5090,41 @@ loadConfig = function(encodedName)
     
     local config = configList[encodedName]
     local function normalizeSingleKeyCode(value, fallback)
-        -- Отладка входного значения
         local valueType = type(value)
-        local valueTypeof = typeof(value)
-        print("[Normalize] Input type:", valueType, "typeof:", valueTypeof, "value:", tostring(value))
-        
-        -- Если это userdata и typeof говорит что EnumItem
-        if valueTypeof == "EnumItem" then
-            print("[Normalize] Already EnumItem:", tostring(value))
-            -- Проверяем, не Unknown ли это уже
-            if value == Enum.KeyCode.Unknown then
-                print("[Normalize] WARNING: Value is already Unknown!")
-            end
+
+        if typeof(value) == "EnumItem" then
             return value
         elseif valueType == "table" and value.__type == "EnumItem" then
-            print("[Normalize] Table with __type=EnumItem")
-            print("[Normalize] enumType:", value.enumType, "name:", value.name)
             local enumTypeName = tostring(value.enumType or ""):match("^Enum%.(.+)$")
-            print("[Normalize] Extracted enumType:", enumTypeName)
             if not enumTypeName then
-                print("[Normalize] ERROR: Could not extract enumType!")
                 return fallback or Enum.KeyCode.Unknown
             end
             local enumObject = Enum[enumTypeName]
             if not enumObject then
-                print("[Normalize] ERROR: Enum object not found for:", enumTypeName)
                 return fallback or Enum.KeyCode.Unknown
             end
             local result = enumObject[value.name]
             if not result then
-                print("[Normalize] ERROR: KeyCode not found:", value.name)
                 return fallback or Enum.KeyCode.Unknown
             end
-            print("[Normalize] Result:", tostring(result))
             return result
         elseif valueType == "string" then
             local keyName = value:match("^Enum%.KeyCode%.(.+)$") or value
-            print("[Normalize] String keyName:", keyName)
             return Enum.KeyCode[keyName] or fallback or Enum.KeyCode.Unknown
         end
-        print("[Normalize] Fallback used, unknown type")
         return fallback or Enum.KeyCode.Unknown
     end
     
     -- Правильно десериализуем hotkeys
     local deserializedHotkeys = {}
-    local hotkeyCount = 0
-    
-    print("[Config Load] Raw hotkeys data:", type(config.data.hotkeys))
+
     for hotkeyKey, hotkeyValue in pairs(config.data.hotkeys or {}) do
-        print("[Config Load] ========== Processing hotkey:", hotkeyKey, "==========")
-        local normalizedKey = normalizeSingleKeyCode(hotkeyValue, Enum.KeyCode.Unknown)
-        deserializedHotkeys[hotkeyKey] = normalizedKey
-        hotkeyCount = hotkeyCount + 1
-        print("[Config Load] Final result for", hotkeyKey, "=", tostring(normalizedKey))
+        deserializedHotkeys[hotkeyKey] = normalizeSingleKeyCode(hotkeyValue, Enum.KeyCode.Unknown)
     end
     getgenv().aim_settings.hotkeys = deserializedHotkeys
     
     -- Отладочный вывод всех загруженных hotkeys
-    print("[Config Load] ========== SUMMARY ==========")
-    print("[Config Load] Total hotkeys loaded:", hotkeyCount)
     for k, v in pairs(deserializedHotkeys) do
-        print("  -", k, ":", tostring(v))
     end
     
     for key, value in pairs(config.data) do
@@ -5309,8 +5331,8 @@ table.insert(State.panels, pConfig)
 
 -- Создаем тестовые конфиги
 -- 6. CHAT PANEL (простой чат в левом нижнем углу)
-spawn(function()
-    wait(1.2)
+task.spawn(function()
+    task.wait(1.2)
     reloadConfigsFromDisk()
     updateConfigList()
 end)
@@ -5499,10 +5521,10 @@ local function sendChatMessage()
         ChatInput.Text = ""
         
         -- Отправляем на сервер в фоне (без ожидания)
-        spawn(function()
+        task.spawn(function()
             sendMessage(message)
             -- Через секунду проверяем новые сообщения для синхронизации
-            wait(1)
+            task.wait(1)
             if chatVisible and getgenv().aim_settings.chat_enabled then
                 loadServerMessages()
             end
@@ -5554,10 +5576,10 @@ animatePanels = function(show)
 end
 
 -- Функция для загрузки сообщений с сервера
-local function loadServerMessages()
+function loadServerMessages()
     if not chatVisible or not getgenv().aim_settings.chat_enabled then return end
     
-    spawn(function()
+    task.spawn(function()
         local serverMessages = fetchMessages()
         if not serverMessages then return end
         
@@ -5605,10 +5627,10 @@ local function loadServerMessages()
 end
 
 -- Функция для первоначальной загрузки всех сообщений
-local function loadAllMessages()
+function loadAllMessages()
     if not chatVisible or not getgenv().aim_settings.chat_enabled then return end
     
-    spawn(function()
+    task.spawn(function()
         local serverMessages = fetchMessages()
         if not serverMessages then return end
         
@@ -5647,9 +5669,9 @@ local function loadAllMessages()
 end
 
 -- Быстрое обновление сообщений (каждые 3 секунды)
-spawn(function()
+task.spawn(function()
     while getgenv().aim_settings.running do
-        wait(3)
+        task.wait(3)
         if chatVisible and getgenv().aim_settings.chat_enabled then
             loadServerMessages()
         end
@@ -5681,16 +5703,19 @@ local renderState = {
 }
 
 -- [[ OPTIMIZATION SETTINGS ]]
+-- Тротлинг отключён: 0 = обновление каждый кадр.
+-- Если понадобится вернуть ограничение (например, на слабом ПК при полном лобби),
+-- поставьте секунды: 0.3 = ~3 раза в секунду.
 local OPTIMIZATION = {
-    UPDATE_INTERVAL = 1/60, -- Обновлять некоторые вещи 60 раз в секунду
-    HITBOX_UPDATE_INTERVAL = 1/15, -- Хитбоксы 15 раз в секунду (более агрессивно)
-    COLOR_CHECK_INTERVAL = 0.5, -- Проверка цвета 2 раза в секунду
-    VIEWMODEL_UPDATE_INTERVAL = 0.3, -- Вьюмодель 3 раза в секунду
-    ESP_UPDATE_INTERVAL = 0.3, -- ESP 3 раза в секунду (КЛЮЧЕВОЕ для FPS)
-    KEYBINDS_UPDATE_INTERVAL = 0.25, -- Кейбинды 4 раза в секунду
-    ARROWS_UPDATE_INTERVAL = 0.3, -- Стрелки 3 раза в секунду
-    ANTIFLING_UPDATE_INTERVAL = 0.5, -- Антифлинг 2 раза в секунду
-    MARKERS_UPDATE_INTERVAL = 0.25, -- Friend markers и Target ESP
+    UPDATE_INTERVAL = 0,
+    HITBOX_UPDATE_INTERVAL = 0,
+    COLOR_CHECK_INTERVAL = 0,
+    VIEWMODEL_UPDATE_INTERVAL = 0,
+    ESP_UPDATE_INTERVAL = 0,
+    KEYBINDS_UPDATE_INTERVAL = 0,
+    ARROWS_UPDATE_INTERVAL = 0,
+    ANTIFLING_UPDATE_INTERVAL = 0,
+    MARKERS_UPDATE_INTERVAL = 0,
 }
 
 local lastHitboxUpdate = 0
@@ -5758,7 +5783,9 @@ State.connections.freecam = G.RS.RenderStepped:Connect(function()
     
     if not fc.original_type then
         fc.original_type = G.Cam.CameraType
-        G.Cam.CameraType = Enum.CameraType.Custom
+        -- Scriptable, иначе стандартный скрипт камеры Roblox продолжает
+        -- писать CFrame каждый кадр и фрикам дёргается.
+        G.Cam.CameraType = Enum.CameraType.Scriptable
         fc.cframe = G.Cam.CFrame
     end
     
@@ -5840,7 +5867,7 @@ State.connections.mainLoop = G.RS.RenderStepped:Connect(function()
         local d = Vector2.new(m.X - targetHudDragStart.X, m.Y - targetHudDragStart.Y)
         TargetHudFrame.Position = UDim2.new(
             0,
-            targetHudStartPos.X.Offset + delta.X,
+            targetHudStartPos.X.Offset + d.X,
             0,
             targetHudStartPos.Y.Offset + d.Y
         )
@@ -5864,6 +5891,60 @@ State.connections.mainLoop = G.RS.RenderStepped:Connect(function()
     FOVCircle.Radius = s.fov
     FOVCircle.Position = G.UIS:GetMouseLocation()
     
+    -- [[ TARGET ESP ANIMATION ]]
+    -- Покадрово, вне тротлинга ESP: иначе вращение обновлялось бы 3 раза в секунду
+    -- (ESP_UPDATE_INTERVAL = 0.3) и шло рывками по ~18 градусов.
+    -- Создание/удаление самого ESP по-прежнему в throttled-блоке ниже.
+    do
+        local c = State.targetEsp.container
+        if s.target_esp and c and c.Parent then
+            local gc1, gc2
+            if s.rainbow_crosshair then
+                renderState.crosshairHue = (renderState.crosshairHue + dt * 0.35) % 1
+                gc1 = Color3.fromHSV(renderState.crosshairHue, 0.7, 1)
+                gc2 = Color3.fromHSV((renderState.crosshairHue + 0.25) % 1, 0.7, 1)
+            else
+                local cc = getClientColor()
+                gc1 = tintColor(cc, 0.82, 0)
+                gc2 = tintColor(cc, 1, 0)
+            end
+            local eg = ColorSequence.new({
+                ColorSequenceKeypoint.new(0, gc1),
+                ColorSequenceKeypoint.new(1, gc2)
+            })
+
+            if s.target_esp_mode == "Circle" then
+                -- Накапливаем угол через dt: скорость не зависит от FPS
+                State.targetEsp.rotation = (State.targetEsp.rotation
+                    + (s.target_esp_rotation_speed or 60) * dt) % 360
+                c.Rotation = State.targetEsp.rotation
+
+                local img = c:FindFirstChild("CircleImage")
+                if img then
+                    local amp = s.target_esp_pulse or 0.06
+                    if amp > 0 then
+                        local pulse = 1 + math.sin(tick() * (s.target_esp_pulse_speed or 2)) * amp
+                        img.Size = UDim2.new(0, 100 * pulse, 0, 100 * pulse)
+                    end
+                    local g = img:FindFirstChild("CircleGradient")
+                    if g then g.Color = eg end
+                end
+            else
+                c.Rotation = 0
+                local h = c:FindFirstChild("LineH")
+                local v = c:FindFirstChild("LineV")
+                if h then
+                    local g = h:FindFirstChild("LineGradient")
+                    if g then g.Color = eg end
+                end
+                if v then
+                    local g = v:FindFirstChild("LineGradient")
+                    if g then g.Color = eg end
+                end
+            end
+        end
+    end
+
     local shouldProcessPlayerVisuals = s.target_esp or s.esp_enabled or s.friend_markers
     if t - lastEspUpdate >= OPTIMIZATION.ESP_UPDATE_INTERVAL then
     if shouldProcessPlayerVisuals then
@@ -5957,54 +6038,22 @@ State.connections.mainLoop = G.RS.RenderStepped:Connect(function()
                     
                     te.Enabled = true
                     local c = te:FindFirstChild("Container")
+                    State.targetEsp.container = c
                     
                     if c then
-                        local gc1, gc2
-                        if s.rainbow_crosshair then
-                            renderState.crosshairHue = renderState.crosshairHue + 0.005
-                            gc1 = Color3.fromHSV(renderState.crosshairHue % 1, 0.7, 1)
-                            gc2 = Color3.fromHSV((renderState.crosshairHue + 0.25) % 1, 0.7, 1)
-                        else
-                            local cc = getClientColor()
-                            gc1 = tintColor(cc, 0.82, 0)
-                            gc2 = tintColor(cc, 1, 0)
-                        end
-                        local eg = ColorSequence.new({ColorSequenceKeypoint.new(0, gc1), ColorSequenceKeypoint.new(1, gc2)})
-
+                        -- Переключение режима. Вращение, пульсация и цвет градиента
+                        -- обновляются покадрово в блоке TARGET ESP ANIMATION выше.
                         if s.target_esp_mode == "Circle" then
                             c.LineH.Visible = false
                             c.LineV.Visible = false
                             c.CircleImage.Visible = true
-                            -- ПЛАВНОЕ ВРАЩЕНИЕ с настраиваемой скоростью
-                            c.Rotation = (tick() * (s.target_esp_rotation_speed or 60)) % 360
-                            
-                            local g = c.CircleImage:FindFirstChild("CircleGradient")
-                            if g then
-                                -- RAINBOW для Circle тоже!
-                                if s.rainbow_crosshair then
-                                    g.Color = eg
-                                else
-                                    g.Color = eg
-                                end
-                                c.CircleImage.ImageColor3 = Color3.fromRGB(255, 255, 255)
-                            end
+                            c.CircleImage.ImageColor3 = Color3.fromRGB(255, 255, 255)
                         else
-                            -- Crosshair Mode
                             c.LineH.Visible = true
                             c.LineV.Visible = true
                             c.CircleImage.Visible = false
-                            c.Rotation = 0
-
                             c.LineH.BackgroundColor3 = Color3.fromRGB(255, 255, 255)
                             c.LineV.BackgroundColor3 = Color3.fromRGB(255, 255, 255)
-                            local lineHGradient = c.LineH:FindFirstChild("LineGradient")
-                            local lineVGradient = c.LineV:FindFirstChild("LineGradient")
-                            if lineHGradient then
-                                lineHGradient.Color = eg
-                            end
-                            if lineVGradient then
-                                lineVGradient.Color = eg
-                            end
                         end
                     end
                 else
@@ -6031,6 +6080,13 @@ State.connections.mainLoop = G.RS.RenderStepped:Connect(function()
     
     local function clearAuraChams(character)
         if not character then return end
+        -- Быстрый выход: без него GetDescendants() гонялся бы по каждому
+        -- персонажу каждый кадр, даже когда чистить нечего.
+        if not (character:FindFirstChild("Y_ESP_Glow")
+            or character:FindFirstChild("Y_ESP_Glow_Outline")
+            or character:FindFirstChild("Y_ESP_Aura")) then
+            return
+        end
         for _, obj in pairs(character:GetDescendants()) do
             if obj.Name == "Y_ESP_Aura"
                 or obj.Name == "Y_ESP_Aura_Attachment"
@@ -6534,7 +6590,19 @@ State.connections.mainLoop = G.RS.RenderStepped:Connect(function()
     
     -- Keybind List Display
     KeybindList.Visible = getgenv().aim_settings.hud_enabled and getgenv().aim_settings.keybind_list_enabled
-    if getgenv().aim_settings.hud_enabled and getgenv().aim_settings.keybind_list_enabled and t - lastKeybindUpdate >= OPTIMIZATION.KEYBINDS_UPDATE_INTERVAL then
+    if getgenv().aim_settings.hud_enabled and getgenv().aim_settings.keybind_list_enabled
+        and t - lastKeybindUpdate >= OPTIMIZATION.KEYBINDS_UPDATE_INTERVAL then
+        local bindEntries = getVisibleKeybindEntries()
+
+        -- Подпись содержимого списка. Без неё покадровый режим уничтожал бы
+        -- и заново создавал все GUI-элементы каждый кадр.
+        local signature = ""
+        for _, e in ipairs(bindEntries) do
+            signature = signature .. e.name .. "|" .. tostring(e.keyCode) .. "|" .. tostring(e.active) .. ";"
+        end
+
+        if signature ~= State.keybindSignature then
+        State.keybindSignature = signature
         -- Удаляем старые элементы
         for _, item in pairs(State.keybindItems) do
             if item then item:Destroy() end
@@ -6542,7 +6610,6 @@ State.connections.mainLoop = G.RS.RenderStepped:Connect(function()
         State.keybindItems = {}
         
         local orderIndex = 3
-        local bindEntries = getVisibleKeybindEntries()
         -- Добавляем активные кейбинды
         for _, bindEntry in ipairs(bindEntries) do
             local keyCode = bindEntry.keyCode
@@ -6593,6 +6660,7 @@ State.connections.mainLoop = G.RS.RenderStepped:Connect(function()
         
         -- Обновляем размер панели
         tw(KeybindList, {Size = UDim2.new(0, 180, 0, keybindLayout.AbsoluteContentSize.Y + 10)}, 0.2)
+        end
         lastKeybindUpdate = t
     end
     
@@ -6783,7 +6851,7 @@ State.connections.mainLoop = G.RS.RenderStepped:Connect(function()
                     local rayDirection = Vector3.new(0, -100, 0) -- Луч вниз на 100 стадов
                     
                     local raycastParams = RaycastParams.new()
-                    raycastParams.FilterType = Enum.RaycastFilterType.Blacklist
+                    raycastParams.FilterType = RAYCAST_EXCLUDE
                     raycastParams.FilterDescendantsInstances = {player.Character} -- Исключаем самого игрока
                     
                     local raycastResult = workspace:Raycast(rayOrigin, rayDirection, raycastParams)
@@ -7329,7 +7397,7 @@ State.connections.mainLoop = G.RS.RenderStepped:Connect(function()
                         flashFrame.ZIndex = 1000
                         
                         -- Быстро исчезает
-                        local flashTween = TweenService:Create(flashFrame, 
+                        local flashTween = G.TS:Create(flashFrame, 
                             TweenInfo.new(0.1, Enum.EasingStyle.Quad, Enum.EasingDirection.Out), 
                             {BackgroundTransparency = 1}
                         )
@@ -7360,7 +7428,7 @@ State.connections.mainLoop = G.RS.RenderStepped:Connect(function()
                             fireCorner.CornerRadius = UDim.new(1, 0)
                             
                             -- Анимация огня (движение вверх и исчезновение)
-                            local fireTween = TweenService:Create(fireParticle,
+                            local fireTween = G.TS:Create(fireParticle,
                                 TweenInfo.new(1.5, Enum.EasingStyle.Quad, Enum.EasingDirection.Out),
                                 {
                                     Position = UDim2.new(
@@ -7946,7 +8014,7 @@ G.UIS.InputEnded:Connect(function(input, gp)
 end)
 
 -- Fly Functions (using State to avoid local variable limit)
-local function Fly_Cleanup()
+function Fly_Cleanup()
     if State.fly then
         if State.fly.connection then State.fly.connection:Disconnect() end
         if State.fly.bodyGyro then State.fly.bodyGyro:Destroy() end
@@ -7973,7 +8041,7 @@ local function Fly_Cleanup()
             State.fly.hm:SetStateEnabled(Enum.HumanoidStateType.FallingDown, true)
             State.fly.hm:SetStateEnabled(Enum.HumanoidStateType.Flying, true)
             State.fly.hm:SetStateEnabled(Enum.HumanoidStateType.Freefall, true)
-            State.fly.hm.WalkSpeed = 16
+            State.fly.hm.WalkSpeed = State.fly.originalWalkSpeed or 16
         end
         
         State.fly = {}
@@ -8406,7 +8474,7 @@ local function Fly_Mode_Test()
             -- Проверяем касание земли
             local rayParams = RaycastParams.new()
             rayParams.FilterDescendantsInstances = {State.fly.ch}
-            rayParams.FilterType = Enum.RaycastFilterType.Blacklist
+            rayParams.FilterType = RAYCAST_EXCLUDE
             local ray = workspace:Raycast(State.fly.hr.Position, Vector3.new(0, -5, 0), rayParams)
             
             if ray or State.fly.touchCooldown <= 0 then
@@ -8570,7 +8638,7 @@ local function Fly_Mode_Legit()
         -- Проверяем землю
         local rayParams = RaycastParams.new()
         rayParams.FilterDescendantsInstances = {State.fly.ch, State.fly.platform}
-        rayParams.FilterType = Enum.RaycastFilterType.Blacklist
+        rayParams.FilterType = RAYCAST_EXCLUDE
         
         local rayResult = workspace:Raycast(hrPos, Vector3.new(0, -100, 0), rayParams)
         
@@ -8629,244 +8697,6 @@ local function Fly_Mode_Legit()
                 currentVel.X * scale,
                 currentVel.Y,
                 currentVel.Z * scale
-            )
-        end
-    end)
-end
-
-local function Fly_Init()
-    Fly_Cleanup()
-    if not getgenv().aim_settings.fly_enabled then return end
-    
-    State.fly = {ch = G.LP.Character}
-    if not State.fly.ch then return end
-    State.fly.hr = State.fly.ch:FindFirstChild("HumanoidRootPart")
-    State.fly.hm = State.fly.ch:FindFirstChildOfClass("Humanoid")
-    if not State.fly.hr then return end
-    
-    State.flyS = getgenv().aim_settings
-    State.fly.mode = State.flyS.fly_mode
-    State.fly.stateChangeDelay = 0.15
-    
-    -- Создаём пул невидимых платформ с улучшенными свойствами
-    for i = 1, State.fly.maxParts do
-        local part = Instance.new("Part")
-        -- Рандомизация размера для обхода детекта паттернов
-        local sizeVariation = (math.random(70, 90) / 10)
-        part.Size = Vector3.new(sizeVariation, 0.4, sizeVariation)
-        part.Transparency = 1
-        part.Anchored = true
-        part.CanCollide = true
-        part.Name = "LP_" .. math.random(1000, 9999)
-        part.Material = Enum.Material.ForceField
-        part.CastShadow = false
-        part.Parent = workspace
-        
-        -- Отключаем сетевую репликацию
-        pcall(function()
-            part:SetNetworkOwner(nil)
-        end)
-        
-        -- Делаем парт невидимым через дополнительные свойства
-        pcall(function()
-            part.LocalTransparencyModifier = 1
-        end)
-        
-        table.insert(State.fly.parts, {
-            part = part, 
-            spawnTime = 0, 
-            active = false,
-            offset = Vector3.new(math.random(-10, 10) / 100, 0, math.random(-10, 10) / 100)
-        })
-    end
-    
-    -- BodyGyro для плавного поворота
-    State.fly.bodyGyro = Instance.new("BodyGyro", State.fly.hr)
-    State.fly.bodyGyro.MaxTorque = Vector3.new(9e9, 9e9, 9e9)
-    State.fly.bodyGyro.P = 8e4 -- Немного снижено для плавности
-    State.fly.bodyGyro.D = 500 -- Добавлено демпфирование
-    
-    -- Настройка состояний Humanoid для легитимности
-    State.fly.hm:SetStateEnabled(Enum.HumanoidStateType.Climbing, false)
-    State.fly.hm:SetStateEnabled(Enum.HumanoidStateType.FallingDown, true) -- Разрешаем падение
-    State.fly.hm:SetStateEnabled(Enum.HumanoidStateType.Flying, false)
-    State.fly.hm:SetStateEnabled(Enum.HumanoidStateType.Freefall, true) -- Разрешаем свободное падение
-    
-    -- Сохраняем оригинальные значения
-    State.fly.originalWalkSpeed = State.fly.hm.WalkSpeed
-    State.fly.originalJumpPower = State.fly.hm.JumpPower
-    
-    State.fly.connection = G.RS.Heartbeat:Connect(function(dt)
-        if not (State.flyS.fly_enabled and State.fly.ch and State.fly.hr and State.fly.hm and State.fly.bodyGyro) then 
-            Fly_Cleanup() 
-            return 
-        end
-        
-        -- Плавное вращение камеры
-        State.fly.bodyGyro.CFrame = State.fly.bodyGyro.CFrame:Lerp(G.Cam.CFrame, 0.15)
-        getFlyMoveDirection()
-        
-        local moveSpeed = State.flyS.fly_speed * 16
-        local currentTime = tick()
-        
-        -- ═══════════════════════════════════════════════════════════════════════
-        -- ПРОВЕРКА БЛИЗОСТИ К ЗЕМЛЕ (для адаптивного поведения)
-        -- ═══════════════════════════════════════════════════════════════════════
-        if currentTime - State.fly.lastGroundCheck >= State.fly.groundCheckInterval then
-            local rayParams = RaycastParams.new()
-            rayParams.FilterDescendantsInstances = {State.fly.ch}
-            rayParams.FilterType = Enum.RaycastFilterType.Blacklist
-            
-            local rayResult = workspace:Raycast(
-                State.fly.hr.Position, 
-                Vector3.new(0, -15, 0), 
-                rayParams
-            )
-            
-            State.fly.isNearGround = rayResult ~= nil
-            State.fly.lastGroundCheck = currentTime
-        end
-        
-        -- ═══════════════════════════════════════════════════════════════════════
-        -- МИКРО-КОЛЕБАНИЯ ДЛЯ ЕСТЕСТВЕННОСТИ
-        -- ═══════════════════════════════════════════════════════════════════════
-        State.fly.microTime = State.fly.microTime + dt
-        State.fly.microOffset = Vector3.new(
-            math.sin(State.fly.microTime * 3.2) * 0.015,
-            math.sin(State.fly.microTime * 2.1) * 0.02 + math.cos(State.fly.microTime * 1.5) * 0.015,
-            math.cos(State.fly.microTime * 2.8) * 0.015
-        )
-        
-        -- Вариация высоты для имитации неровной ходьбы
-        State.fly.heightVariation = math.sin(State.fly.microTime * 4.5) * 0.08
-        
-        -- ═══════════════════════════════════════════════════════════════════════
-        -- УПРАВЛЕНИЕ ПЛАТФОРМАМИ
-        -- ═══════════════════════════════════════════════════════════════════════
-        -- Удаляем старые платформы
-        for i, partData in ipairs(State.fly.parts) do
-            if partData.active and (currentTime - partData.spawnTime) > State.fly.partLifetime then
-                -- Плавно опускаем платформу вниз перед удалением
-                tw(partData.part, {CFrame = CFrame.new(0, -1000, 0)}, 0.2)
-                task.delay(0.2, function()
-                    if partData.part then
-                        partData.part.CFrame = CFrame.new(0, -1000, 0)
-                    end
-                end)
-                partData.active = false
-            end
-        end
-        
-        -- Создаём новую платформу с рандомизированным интервалом
-        local spawnInterval = 0.25 + math.random() * 0.15 -- 0.25-0.4 секунды
-        if currentTime >= State.fly.nextPartTime then
-            local partData = State.fly.parts[State.fly.partIndex]
-            
-            if partData then
-                local hrPos = State.fly.hr.Position
-                
-                -- Позиция платформы с учётом микро-колебаний и вариации
-                local partYOffset = -3.2 + State.fly.heightVariation
-                local partPos = Vector3.new(
-                    hrPos.X + partData.offset.X + State.fly.microOffset.X,
-                    hrPos.Y + partYOffset,
-                    hrPos.Z + partData.offset.Z + State.fly.microOffset.Z
-                )
-                
-                -- Рандомизация угла поворота платформы
-                local randomRotation = CFrame.Angles(
-                    math.rad(math.random(-2, 2)),
-                    math.rad(math.random(0, 360)),
-                    math.rad(math.random(-2, 2))
-                )
-                
-                partData.part.CFrame = CFrame.new(partPos) * randomRotation
-                partData.spawnTime = currentTime
-                partData.active = true
-                State.fly.currentPart = partData.part
-            end
-            
-            -- Переход к следующей платформе
-            State.fly.partIndex = State.fly.partIndex + 1
-            if State.fly.partIndex > State.fly.maxParts then
-                State.fly.partIndex = 1
-            end
-            
-            State.fly.nextPartTime = currentTime + spawnInterval
-        end
-        
-        -- ═══════════════════════════════════════════════════════════════════════
-        -- ДВИЖЕНИЕ С АДАПТИВНОЙ ФИЗИКОЙ
-        -- ═══════════════════════════════════════════════════════════════════════
-        if State.flyDir.Magnitude > 0 then
-            -- Адаптивная скорость в зависимости от близости к земле
-            local adaptiveSpeed = State.fly.isNearGround and (moveSpeed * 0.85) or moveSpeed
-            State.fly.hm.WalkSpeed = adaptiveSpeed
-            
-            -- Естественное движение через Humanoid
-            State.fly.hm:Move(State.flyDir, false)
-            
-            -- Плавная коррекция velocity с учётом микро-колебаний
-            local targetVel = State.flyDir * adaptiveSpeed
-            local currentVel = State.fly.hr.Velocity
-            
-            -- Добавляем небольшие колебания к velocity для естественности
-            local velocityNoise = Vector3.new(
-                math.sin(State.fly.microTime * 5.3) * 0.3,
-                math.cos(State.fly.microTime * 3.7) * 0.2,
-                math.sin(State.fly.microTime * 4.1) * 0.3
-            )
-            
-            State.fly.hr.Velocity = currentVel:Lerp(targetVel + velocityNoise, State.fly.velocitySmoothing)
-            
-            -- Имитация инерции при изменении направления
-            local velocityDiff = (targetVel - currentVel).Magnitude
-            if velocityDiff > 5 then
-                State.fly.velocitySmoothing = 0.15 -- Медленнее при резких поворотах
-            else
-                State.fly.velocitySmoothing = 0.25 -- Быстрее при плавном движении
-            end
-        else
-            -- Плавная остановка с имитацией трения
-            State.fly.hm.WalkSpeed = State.fly.originalWalkSpeed
-            local currentVel = State.fly.hr.Velocity
-            State.fly.hr.Velocity = Vector3.new(
-                currentVel.X * 0.88,
-                currentVel.Y * 0.95,
-                currentVel.Z * 0.88
-            )
-        end
-        
-        -- ═══════════════════════════════════════════════════════════════════════
-        -- УМНОЕ УПРАВЛЕНИЕ СОСТОЯНИЯМИ
-        -- ═══════════════════════════════════════════════════════════════════════
-        local currentState = State.fly.hm:GetState()
-        
-        -- Разрешаем кратковременное падение для естественности
-        if currentTime - State.fly.lastStateChange >= State.fly.stateChangeDelay then
-            if currentState == Enum.HumanoidStateType.Freefall or 
-               currentState == Enum.HumanoidStateType.FallingDown then
-                -- Возвращаем в состояние бега только если прошло достаточно времени
-                if math.random() > 0.3 then -- 70% шанс вернуться в бег
-                    State.fly.hm:ChangeState(Enum.HumanoidStateType.Running)
-                    State.fly.lastStateChange = currentTime
-                end
-            elseif currentState ~= Enum.HumanoidStateType.Running and 
-                   currentState ~= Enum.HumanoidStateType.RunningNoPhysics then
-                -- Для других состояний возвращаем в бег
-                State.fly.hm:ChangeState(Enum.HumanoidStateType.Running)
-                State.fly.lastStateChange = currentTime
-            end
-        end
-        
-        -- ═══════════════════════════════════════════════════════════════════════
-        -- ОГРАНИЧЕНИЕ СКОРОСТИ ПАДЕНИЯ (антидетект)
-        -- ═══════════════════════════════════════════════════════════════════════
-        if State.fly.hr.Velocity.Y < -50 then
-            State.fly.hr.Velocity = Vector3.new(
-                State.fly.hr.Velocity.X,
-                -50,
-                State.fly.hr.Velocity.Z
             )
         end
     end)
@@ -9076,7 +8906,7 @@ State.connections.playerEspPlayerRemoving = G.Plr.PlayerRemoving:Connect(functio
 end)
 
 State.connections.characterAdded = G.LP.CharacterAdded:Connect(function() 
-    wait(0.5) 
+    task.wait(0.5) 
     IJ_I()
     Movement.Spider.Init()
     Movement.AirStuck.Init()
