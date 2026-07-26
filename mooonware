@@ -39,6 +39,8 @@ getgenv().aim_settings = {
     rainbow_crosshair = false,
     prediction_enabled = false,
     prediction_amount = 0.13,
+    auto_predict = false,          -- предикт считается от скорости цели и пинга
+    auto_predict_strength = 1,
     smooth_enabled = false,
     smooth_amount = 0.1,
     noise_enabled = false,
@@ -101,7 +103,46 @@ getgenv().aim_settings = {
     viewmodel_color = Color3.fromRGB(0, 170, 255),
     clickgui_bind = Enum.KeyCode.RightControl,
     hotkeys = {},
+    hotkey_modes = {}, -- settingKey -> "Toggle" | "Hold"
     friends = {},
+    ui_positions = {}, -- сохранённые позиции окон и HUD (пишутся в конфиг)
+    -- Anti-AFK
+    anti_afk = false,
+    -- Noclip
+    noclip_enabled = false,
+    -- ESP Box / Tracers / дистанция
+    esp_box = false,
+    esp_tracers = false,
+    esp_tracer_origin = "Bottom", -- "Bottom" | "Center" | "Mouse"
+    esp_max_distance = 1000,
+    -- Друзья
+    friends_window = false,
+    clickgui_hover_outline = true, -- подсветка обводки при наведении на модуль
+    clickgui_module_glow = true,          -- подсветка модуля при наведении
+    clickgui_module_glow_strength = 0.25, -- сила подсветки
+    clickgui_module_glow_speed = 0.5,    -- скорость бегущего блика
+    -- Mouse Glow: свечение вокруг самого курсора
+    mouse_glow = true,
+    mouse_glow_size = 40,
+    mouse_glow_stretch = 1,      -- вытягивание в сторону движения курсора
+    mouse_glow_dot = 5,
+    mouse_glow_always = false,   -- показывать и при закрытом меню
+    mouse_glow_rainbow = false,
+    mouse_glow_on_hover = true,          -- показывать только над модулем
+    mouse_glow_style = "Liquid Glass",   -- "Liquid Glass" | "Neon"
+    hud_accents = false, -- вертикальные акцентные полосы на карточках HUD
+    -- Arraylist (список активных модулей)
+    hud_arraylist = true,
+    hud_arraylist_sort = "Long", -- "Long" | "Short" | "Name"
+    hud_arraylist_gradient = true,
+    hud_arraylist_colored_text = false,
+    -- Уведомления
+    notifications_enabled = true,
+    notification_time = 4,
+    notification_speed = 0.18, -- длительность анимации появления/скрытия
+    notification_modules = true, -- сообщать о включении/выключении функций
+    -- Паника: мгновенно выключает все функции
+    panic_key = Enum.KeyCode.Delete,
     -- Hitboxes settings
     hitboxes_enabled = false,
     hitboxes_visualization = false,
@@ -184,9 +225,14 @@ G.Cam = workspace.CurrentCamera
 -- Utility
 local function tw(o, p, t) return G.TS:Create(o, TweenInfo.new(t or 0.25, Enum.EasingStyle.Quart, Enum.EasingDirection.Out), p):Play() end
 
+-- Таблица расширений. Объявлена здесь, потому что на неё ссылаются
+-- обработчики, создаваемые выше блока EXTENSIONS (например, ПКМ по биндам).
+local EXT = {}
+
 -- [[ GLOBAL STATE ]]
 local State = {
     LockedTarget = nil,
+    targetHud = {ratio = 1, userId = nil, color = nil},
     targetEsp = {container = nil, rotation = 0},
     lastAimbotCFrame = nil,
     chinaHat = nil,
@@ -235,6 +281,13 @@ local State = {
     },
     keybindItems = {},
     keybindSignature = nil,
+    draggables = {},      -- ключ -> GuiObject, для сохранения позиций
+    notifications = {},   -- активные тосты
+    espDrawings = {},     -- player -> {box, tracer}
+    friendsWindow = {},   -- ссылки на элементы окна друзей
+    noclip = {},
+    moduleIndex = {},     -- settingKey -> {контейнеры модулей} для поиска
+    searchQuery = "",
     playerVisualsActive = false,
     persistentPlayerEspActive = false,
     playerEspRegistry = {},
@@ -361,7 +414,7 @@ local State = {
 
 -- Blacklist объявлен устаревшим; Exclude есть не во всех сборках,
 -- поэтому берём его через pcall с откатом на старое имя.
-local RAYCAST_EXCLUDE = (function()
+G.RayExclude = (function()
     local ok, value = pcall(function() return Enum.RaycastFilterType.Exclude end)
     if ok and value then return value end
     return Enum.RaycastFilterType.Blacklist
@@ -575,7 +628,7 @@ Movement.Spider = {
                 for _, d in ipairs({Vector3.new(1,0,0), Vector3.new(-1,0,0), Vector3.new(0,0,1), Vector3.new(0,0,-1)}) do
                     State.spider.rp = RaycastParams.new()
                     State.spider.rp.FilterDescendantsInstances = {State.spider.ch}
-                    State.spider.rp.FilterType = RAYCAST_EXCLUDE
+                    State.spider.rp.FilterType = G.RayExclude
                     if workspace:Raycast(State.spider.hr.Position, d * 3, State.spider.rp) then
                         State.spider.wd = true
                         break
@@ -763,7 +816,7 @@ Movement.SafeWalk = {
                 
                 local rayParams = RaycastParams.new()
                 rayParams.FilterDescendantsInstances = {State.safeWalk.ch}
-                rayParams.FilterType = RAYCAST_EXCLUDE
+                rayParams.FilterType = G.RayExclude
                 rayParams.IgnoreWater = false
                 
                 local rayResult = workspace:Raycast(rayOrigin, rayDirection, rayParams)
@@ -1211,9 +1264,29 @@ end
 
 -- [[ HUD DRAG ]] Универсальное перетаскивание HUD-элементов.
 -- Двигать можно только при открытом ClickGui, чтобы не таскать HUD случайно в бою.
-local function makeHudDraggable(gui)
+-- Позиции всех перетаскиваемых элементов хранятся в aim_settings.ui_positions
+-- и попадают в конфиг вместе с остальными настройками.
+function EXT.saveUiPosition(key, position)
+    if not key then return end
+    getgenv().aim_settings.ui_positions[key] = {
+        xs = position.X.Scale, xo = position.X.Offset,
+        ys = position.Y.Scale, yo = position.Y.Offset
+    }
+end
+
+function EXT.applyUiPosition(key, gui)
+    local saved = getgenv().aim_settings.ui_positions[key]
+    if not (saved and gui) then return end
+    gui.Position = UDim2.new(saved.xs or 0, saved.xo or 0, saved.ys or 0, saved.yo or 0)
+end
+
+function EXT.makeHudDraggable(gui, key)
     if not gui then return end
     gui.Active = true
+    if key then
+        State.draggables[key] = gui
+        EXT.applyUiPosition(key, gui)
+    end
 
     local dragging = false
     local dragStart = nil
@@ -1245,6 +1318,7 @@ local function makeHudDraggable(gui)
             startPos.Y.Scale,
             startPos.Y.Offset + delta.Y
         )
+        EXT.saveUiPosition(key, gui.Position)
     end)
 
     G.UIS.InputEnded:Connect(function(input)
@@ -1505,6 +1579,9 @@ TargetHudAccent.BackgroundColor3 = getClientColor()
 TargetHudAccent.BorderSizePixel = 0
 Instance.new("UICorner", TargetHudAccent).CornerRadius = UDim.new(1, 0)
 
+State.draggables["target_hud"] = TargetHudFrame
+EXT.applyUiPosition("target_hud", TargetHudFrame)
+
 -- Dragging variables for TargetHud
 local targetHudDragging = false
 local targetHudDragStart = nil
@@ -1536,8 +1613,8 @@ InfoContainer.BackgroundTransparency = 1
 
 -- Player Name
 local TargetNameLabel = Instance.new("TextLabel", InfoContainer)
-TargetNameLabel.Size = UDim2.new(1, 0, 0, 20)
-TargetNameLabel.Position = UDim2.new(0, 0, 0, 2)
+TargetNameLabel.Size = UDim2.new(1, 0, 0, 16)
+TargetNameLabel.Position = UDim2.new(0, 0, 0, 0)
 TargetNameLabel.BackgroundTransparency = 1
 TargetNameLabel.Text = "moonware"
 TargetNameLabel.TextColor3 = Color3.fromRGB(255, 255, 255)
@@ -1558,8 +1635,8 @@ TargetMetaLabel.Visible = false
 
 -- HP Text
 local TargetHPLabel = Instance.new("TextLabel", InfoContainer)
-TargetHPLabel.Size = UDim2.new(1, 0, 0, 16)
-TargetHPLabel.Position = UDim2.new(0, 0, 0, 18)
+TargetHPLabel.Size = UDim2.new(1, 0, 0, 14)
+TargetHPLabel.Position = UDim2.new(0, 0, 0, 16)
 TargetHPLabel.BackgroundTransparency = 1
 TargetHPLabel.Text = "HP: 100"
 TargetHPLabel.TextColor3 = THEME.TEXT_DIM
@@ -1569,7 +1646,7 @@ TargetHPLabel.TextXAlignment = Enum.TextXAlignment.Left
 
 local TargetSpeedInfoLabel = Instance.new("TextLabel", InfoContainer)
 TargetSpeedInfoLabel.Size = UDim2.new(1, -4, 0, 12)
-TargetSpeedInfoLabel.Position = UDim2.new(0, 0, 1, -22)
+TargetSpeedInfoLabel.Position = UDim2.new(0, 0, 0, 30)
 TargetSpeedInfoLabel.BackgroundTransparency = 1
 TargetSpeedInfoLabel.Text = "0.0 studs/s"
 TargetSpeedInfoLabel.TextColor3 = THEME.TEXT_DIM
@@ -1579,8 +1656,8 @@ TargetSpeedInfoLabel.TextXAlignment = Enum.TextXAlignment.Left
 
 -- HP Bar Background
 local HPBarBG = Instance.new("Frame", InfoContainer)
-HPBarBG.Size = UDim2.new(1, -2, 0, 8)
-HPBarBG.Position = UDim2.new(0, 0, 1, -10)
+HPBarBG.Size = UDim2.new(1, -2, 0, 7)
+HPBarBG.Position = UDim2.new(0, 0, 1, -9)
 HPBarBG.BackgroundColor3 = Color3.fromRGB(0, 0, 0)
 HPBarBG.BackgroundTransparency = 1
 HPBarBG.BorderSizePixel = 0
@@ -1627,10 +1704,10 @@ ArrowsContainer.BackgroundTransparency = 1
 ArrowsContainer.Visible = false
 
 -- Делаем HUD-элементы перетаскиваемыми
-makeHudDraggable(WatermarkFrame)
-makeHudDraggable(KeybindList)
-makeHudDraggable(SpeedLabel)
-makeHudDraggable(PlayerInfoLabel)
+EXT.makeHudDraggable(WatermarkFrame, "watermark")
+EXT.makeHudDraggable(KeybindList, "keybinds")
+EXT.makeHudDraggable(SpeedLabel, "speed_display")
+EXT.makeHudDraggable(PlayerInfoLabel, "player_info")
 
 local animationStep = 60
 local targetAnimationStep = 60
@@ -2524,7 +2601,7 @@ local function hasLineOfSight(targetPart)
     end
     
     local raycastParams = RaycastParams.new()
-    raycastParams.FilterType = RAYCAST_EXCLUDE
+    raycastParams.FilterType = G.RayExclude
     local ignoreList = {G.Cam}
     if G.LP.Character then
         table.insert(ignoreList, G.LP.Character)
@@ -2609,6 +2686,16 @@ local function getClosest()
     return target
 end
 
+local function getPingSeconds()
+    local ok, pingValue = pcall(function()
+        return game:GetService("Stats").Network.ServerStatsItem["Data Ping"]:GetValue()
+    end)
+    if not ok then
+        return 0
+    end
+    return math.clamp(math.max(0, pingValue) / 1000, 0, 0.18)
+end
+
 local function getPredictedPosition(part)
     if not part or not part.Parent then 
         return part and part.Position or Vector3.new(0, 0, 0)
@@ -2620,41 +2707,38 @@ local function getPredictedPosition(part)
         return part.Position
     end
     
-    -- Уменьшаем базовый prediction в 2 раза для более медленного наведения
-    local prediction = getgenv().aim_settings.prediction_amount * 0.5
-    
+    local s = getgenv().aim_settings
+    local horizontalVelocity = Vector3.new(velocity.X, 0, velocity.Z)
+    local speed = horizontalVelocity.Magnitude
+
+    local prediction
+    if s.auto_predict then
+        -- Auto Predict: упреждение считается само - из задержки сети и
+        -- скорости цели. Ползунок Predict Amount при этом не участвует.
+        prediction = (getPingSeconds() + math.clamp(speed / 220, 0, 0.22))
+            * (s.auto_predict_strength or 1)
+    else
+        -- Ручной режим: половина ползунка, масштабируется скоростью
+        prediction = s.prediction_amount * 0.5
+        if speed > 0 then
+            prediction = prediction * (speed / 20)
+        end
+    end
+
     local character = part.Parent
     local humanoid = character:FindFirstChildOfClass("Humanoid")
     if humanoid and humanoid.Health > 0 then
         local state = humanoid:GetState()
         if state == Enum.HumanoidStateType.Freefall then
-            -- При падении УВЕЛИЧИВАЕМ prediction (игрок быстро летит вниз)
-            prediction = prediction * 3
+            -- В падении цель разгоняется вниз. В авторежиме поправка мягче:
+            -- вертикальная скорость уже учтена в самом векторе velocity.
+            prediction = prediction * (s.auto_predict and 1.6 or 3)
         elseif state == Enum.HumanoidStateType.Jumping then
-            -- При прыжке умеренный prediction
             prediction = prediction * 1.5
         end
     end
-    
-    local horizontalVelocity = Vector3.new(velocity.X, 0, velocity.Z)
-    local speed = horizontalVelocity.Magnitude
-    if speed > 0 then
-        -- Уменьшаем влияние скорости
-        local speedFactor = speed / 20 -- Было 16, стало 20 (медленнее)
-        prediction = prediction * speedFactor
-    end
-    
-    return part.Position + (velocity * prediction)
-end
 
-local function getPingSeconds()
-    local ok, pingValue = pcall(function()
-        return game:GetService("Stats").Network.ServerStatsItem["Data Ping"]:GetValue()
-    end)
-    if not ok then
-        return 0
-    end
-    return math.clamp(math.max(0, pingValue) / 1000, 0, 0.18)
+    return part.Position + (velocity * prediction)
 end
 
 local function getTargetStrafePlayer()
@@ -3084,7 +3168,10 @@ function updateAimbotCamera()
         return
     end
 
-    local targetPos = getgenv().aim_settings.prediction_enabled and getPredictedPosition(State.LockedTarget) or State.LockedTarget.Position
+    local usePrediction = getgenv().aim_settings.prediction_enabled
+        or getgenv().aim_settings.auto_predict
+    local targetPos = usePrediction and getPredictedPosition(State.LockedTarget)
+        or State.LockedTarget.Position
 
     if getgenv().aim_settings.noise_enabled then
         local noiseAmount = getgenv().aim_settings.noise_amount
@@ -3501,6 +3588,8 @@ function CategoryPanel:addModule(moduleName, settingKey, hasSettings)
         settingKey = settingKey,
         expanded = false,
         settings = {},
+        searchEntries = {}, -- {name, frame} для поиска по подпунктам
+        sections = {},      -- заголовки групп, скрываются при поиске
         hasSettings = hasSettings
     }
 
@@ -3585,16 +3674,32 @@ function CategoryPanel:addModule(moduleName, settingKey, hasSettings)
         arrowLbl.TextSize = 12
     end
     
-    -- Hover эффект
+    -- Hover эффект: свечение живёт внутри самой кнопки
+    local glowLayers = EXT.attachModuleGlow(btn)
     local targetScale = 1
     local currentScale = 1
     
     btn.MouseEnter:Connect(function()
         targetScale = 1.03 -- Увеличение на 3%
+        EXT.setHoveredModule(btn, glowLayers)
+        if getgenv().aim_settings.clickgui_hover_outline then
+            -- Обводка загорается цветом клиента и становится толще
+            tw(btnStroke, {
+                Color = getClientColor(),
+                Thickness = 2,
+                Transparency = 0
+            }, 0.15)
+        end
     end)
     
     btn.MouseLeave:Connect(function()
         targetScale = 1
+        EXT.setHoveredModule(nil, glowLayers)
+        tw(btnStroke, {
+            Color = Color3.fromRGB(100, 100, 100),
+            Thickness = 1,
+            Transparency = 0
+        }, 0.15)
     end)
     
     -- Плавная анимация scale
@@ -3615,6 +3720,8 @@ function CategoryPanel:addModule(moduleName, settingKey, hasSettings)
     
     moduleData.container = container
     moduleData.btn = btn
+    -- Индекс для строки поиска по меню
+    table.insert(State.moduleIndex, {name = moduleName, container = container, module = moduleData})
     moduleData.arrowLbl = arrowLbl
     moduleData.bindBox = bindBox
     moduleData.settingsList = settingsList
@@ -3634,12 +3741,16 @@ function CategoryPanel:addModule(moduleName, settingKey, hasSettings)
         if self.bindingModule ~= moduleData then
             bindBox.BackgroundColor3 = THEME.BIND_BG
         end
+
+        bindBox.TextColor3 = (getgenv().aim_settings.hotkey_modes[settingKey] == "Hold")
+            and getClientColor() or THEME.TEXT_DIM
     end)
     
     btn.MouseButton1Click:Connect(function()
         local state = not getgenv().aim_settings[settingKey]
         getgenv().aim_settings[settingKey] = state
         tw(btn, {BackgroundColor3 = state and getClientColor() or THEME.MODULE_BG}, 0.2)
+        EXT.notifyToggle(settingKey, state)
     end)
     
     btn.MouseButton2Click:Connect(function()
@@ -3658,6 +3769,15 @@ function CategoryPanel:addModule(moduleName, settingKey, hasSettings)
         bindBox.Text = "?"
         bindBox.BackgroundColor3 = Color3.fromRGB(100, 100, 200)
         self.bindingModule = moduleData
+    end)
+
+    -- ПКМ по полю бинда переключает режим Toggle <-> Hold
+    bindBox.MouseButton2Click:Connect(function()
+        local modes = getgenv().aim_settings.hotkey_modes
+        modes[settingKey] = (modes[settingKey] == "Hold") and "Toggle" or "Hold"
+        EXT.notify(moduleName .. ": " .. modes[settingKey])
+        bindBox.TextColor3 = (modes[settingKey] == "Hold")
+            and getClientColor() or THEME.TEXT_DIM
     end)
     
     table.insert(self.modules, moduleData)
@@ -3726,6 +3846,36 @@ function CategoryPanel:addBoolean(moduleData, name, settingKey)
     end)
     
     table.insert(moduleData.settings, frame)
+    table.insert(moduleData.searchEntries, {name = name, frame = frame})
+end
+
+-- Заголовок группы настроек внутри модуля
+function CategoryPanel:addSection(moduleData, title)
+    local frame = Instance.new("Frame", moduleData.settingsList)
+    frame.Size = UDim2.new(1, 0, 0, 24)
+    frame.BackgroundTransparency = 1
+
+    local lbl = Instance.new("TextLabel", frame)
+    lbl.Size = UDim2.new(1, -24, 1, -4)
+    lbl.Position = UDim2.new(0, 12, 0, 0)
+    lbl.BackgroundTransparency = 1
+    lbl.Text = string.upper(title)
+    lbl.TextColor3 = THEME.TEXT_TITLE
+    lbl.TextTransparency = 0.25
+    lbl.Font = Enum.Font.GothamBold
+    lbl.TextSize = 12
+    lbl.TextXAlignment = Enum.TextXAlignment.Left
+
+    local line = Instance.new("Frame", frame)
+    line.Size = UDim2.new(1, -24, 0, 1)
+    line.Position = UDim2.new(0, 12, 1, -3)
+    line.BackgroundColor3 = THEME.MODULE_STROKE
+    line.BackgroundTransparency = 0.4
+    line.BorderSizePixel = 0
+
+    table.insert(moduleData.sections, frame)
+    table.insert(moduleData.settings, frame)
+    return frame
 end
 
 function CategoryPanel:addColorPicker(moduleData, name, settingKey)
@@ -4055,6 +4205,7 @@ function CategoryPanel:addColorPicker(moduleData, name, settingKey)
     end)
     
     table.insert(moduleData.settings, frame)
+    table.insert(moduleData.searchEntries, {name = name, frame = frame})
 end
 
 function CategoryPanel:addSlider(moduleData, name, settingKey, min, max, inc)
@@ -4139,6 +4290,7 @@ function CategoryPanel:addSlider(moduleData, name, settingKey, min, max, inc)
     fill.Size = UDim2.new(math.clamp((startVal - min) / (max - min), 0, 1), 0, 1, 0)
     
     table.insert(moduleData.settings, frame)
+    table.insert(moduleData.searchEntries, {name = name, frame = frame})
 end
 
 function CategoryPanel:addDropdown(moduleData, name, settingKey, options)
@@ -4180,6 +4332,7 @@ function CategoryPanel:addDropdown(moduleData, name, settingKey, options)
     end)
     
     table.insert(moduleData.settings, frame)
+    table.insert(moduleData.searchEntries, {name = name, frame = frame})
 end
 
 function CategoryPanel:addTextBox(name, settingKey, placeholder)
@@ -4283,6 +4436,7 @@ function CategoryPanel:addModuleTextBox(moduleData, name, settingKey, placeholde
     end)
 
     table.insert(moduleData.settings, frame)
+    table.insert(moduleData.searchEntries, {name = name, frame = frame})
 
     return frame
 end
@@ -4298,7 +4452,8 @@ local function getVisibleKeybindEntries()
         table.insert(entries, {
             name = getBindDisplayName(settingKey),
             keyCode = keyCode,
-            active = active == true
+            active = active == true,
+            hold = getgenv().aim_settings.hotkey_modes[settingKey] == "Hold"
         })
     end
 
@@ -4356,7 +4511,1266 @@ function CategoryPanel:addCustomElement(element)
     return element
 end
 
+-- ============================================================================
+-- [[ EXTENSIONS ]] Уведомления, окно друзей, Anti-AFK, Noclip, ESP Box/Tracers.
+-- Всё сложено в одну таблицу EXT, чтобы не упереться в лимит локальных
+-- переменных Lua (200 на функцию, главный чанк уже близко к нему).
+-- Блок обёрнут в do...end: локальные переменные внутри освобождают регистры
+-- главного чанка (лимит Lua - 200). Замыкания продолжают их видеть как upvalue.
+-- ============================================================================
+do
+
+-- ---------------------------------------------------------------- УВЕДОМЛЕНИЯ
+EXT.NotifyHolder = Instance.new("Frame", HudScreenGui)
+EXT.NotifyHolder.Name = "Notifications"
+EXT.NotifyHolder.Size = UDim2.new(0, 260, 0, 200)
+EXT.NotifyHolder.Position = UDim2.new(1, -280, 0, 240)
+EXT.NotifyHolder.BackgroundTransparency = 1
+EXT.NotifyHolder.BorderSizePixel = 0
+
+local notifyLayout = Instance.new("UIListLayout", EXT.NotifyHolder)
+notifyLayout.SortOrder = Enum.SortOrder.LayoutOrder
+notifyLayout.Padding = UDim.new(0, 6)
+notifyLayout.HorizontalAlignment = Enum.HorizontalAlignment.Right
+
+-- Невидимая подложка: без неё пустой холдер нечем схватить мышью.
+EXT.NotifyGrip = Instance.new("Frame", EXT.NotifyHolder)
+EXT.NotifyGrip.Name = "Grip"
+EXT.NotifyGrip.Size = UDim2.new(1, 0, 0, 18)
+EXT.NotifyGrip.BackgroundColor3 = THEME.PANEL_BG
+EXT.NotifyGrip.BackgroundTransparency = 0.85
+EXT.NotifyGrip.BorderSizePixel = 0
+EXT.NotifyGrip.LayoutOrder = 0
+EXT.NotifyGrip.Visible = false
+Instance.new("UICorner", EXT.NotifyGrip).CornerRadius = UDim.new(0, 6)
+
+EXT.makeHudDraggable(EXT.NotifyHolder, "notifications")
+
+function EXT.notify(text, kind)
+    if not getgenv().aim_settings.notifications_enabled then return end
+
+    local accent = getClientColor()
+    if kind == "error" then
+        accent = THEME.RED_CROSS
+    elseif kind == "ok" then
+        accent = THEME.GREEN_CHECK
+    end
+
+    local card = Instance.new("Frame", EXT.NotifyHolder)
+    card.Size = UDim2.new(1, 0, 0, 34)
+    card.BackgroundColor3 = THEME.PANEL_BG
+    card.BackgroundTransparency = 1
+    card.BorderSizePixel = 0
+    card.LayoutOrder = math.floor(tick() * 100) % 1000000
+    Instance.new("UICorner", card).CornerRadius = UDim.new(0, 8)
+
+    local stroke = Instance.new("UIStroke", card)
+    stroke.Color = THEME.PANEL_STROKE
+    stroke.Thickness = 1
+    stroke.Transparency = 1
+
+    local bar = Instance.new("Frame", card)
+    bar.Size = UDim2.new(0, 3, 1, -10)
+    bar.Position = UDim2.new(0, 6, 0, 5)
+    bar.BackgroundColor3 = accent
+    bar.BackgroundTransparency = 1
+    bar.BorderSizePixel = 0
+    Instance.new("UICorner", bar).CornerRadius = UDim.new(1, 0)
+
+    local label = Instance.new("TextLabel", card)
+    label.Size = UDim2.new(1, -22, 1, 0)
+    label.Position = UDim2.new(0, 16, 0, 0)
+    label.BackgroundTransparency = 1
+    label.Text = tostring(text)
+    label.TextColor3 = THEME.TEXT_TITLE
+    label.TextTransparency = 1
+    label.Font = Enum.Font.GothamMedium
+    label.TextSize = 12
+    label.TextXAlignment = Enum.TextXAlignment.Left
+    label.TextWrapped = true
+
+    -- Появление: гасим и проявляем все слои, иначе обводка и полоса
+    -- остаются видимыми и карточка выглядит застрявшей.
+    local speed = getgenv().aim_settings.notification_speed or 0.18
+    tw(card, {BackgroundTransparency = 0.08}, speed)
+    tw(label, {TextTransparency = 0}, speed)
+    tw(stroke, {Transparency = 0.25}, speed)
+    tw(bar, {BackgroundTransparency = 0}, speed)
+
+    table.insert(State.notifications, {
+        card = card, label = label, stroke = stroke, bar = bar,
+        expire = tick() + (getgenv().aim_settings.notification_time or 4),
+        fading = false
+    })
+
+    -- Ограничение на количество: самые старые уходят сразу
+    while #State.notifications > 6 do
+        local oldest = table.remove(State.notifications, 1)
+        if oldest and oldest.card then
+            pcall(function() oldest.card:Destroy() end)
+        end
+    end
+end
+
+-- Срок жизни уведомлений считается в главном цикле, а не в отложенном
+-- потоке: поток мог не досчитать, и последняя карточка висела навсегда.
+function EXT.updateNotifications()
+    local speed = getgenv().aim_settings.notification_speed or 0.18
+    local now = tick()
+
+    for i = #State.notifications, 1, -1 do
+        local n = State.notifications[i]
+        if not (n and n.card and n.card.Parent) then
+            table.remove(State.notifications, i)
+        elseif n.fading then
+            if now >= n.removeAt then
+                pcall(function() n.card:Destroy() end)
+                table.remove(State.notifications, i)
+            end
+        elseif now >= n.expire then
+            n.fading = true
+            n.removeAt = now + speed + 0.05
+            tw(n.card, {BackgroundTransparency = 1}, speed)
+            tw(n.label, {TextTransparency = 1}, speed)
+            tw(n.stroke, {Transparency = 1}, speed)
+            tw(n.bar, {BackgroundTransparency = 1}, speed)
+        end
+    end
+end
+
+function EXT.clearNotifications()
+    for i = #State.notifications, 1, -1 do
+        local n = State.notifications[i]
+        if n and n.card then
+            pcall(function() n.card:Destroy() end)
+        end
+        table.remove(State.notifications, i)
+    end
+end
+
+-- Сообщение о переключении функции. Вызывается и из меню, и из хоткеев.
+function EXT.notifyToggle(settingKey, state)
+    if not getgenv().aim_settings.notification_modules then return end
+    local label = MODULE_NAMES[settingKey] or settingKey
+    EXT.notify(label .. ": " .. (state and "ON" or "OFF"), state and "ok" or "error")
+end
+
+-- ------------------------------------------------------------------ ANTI-AFK
+function EXT.initAntiAfk()
+    if State.antiAfkConnection then return end
+    State.antiAfkConnection = G.LP.Idled:Connect(function()
+        if not getgenv().aim_settings.anti_afk then return end
+        pcall(function()
+            local vu = game:GetService("VirtualUser")
+            vu:CaptureController()
+            vu:ClickButton2(Vector2.new(0, 0))
+        end)
+    end)
+end
+
+-- -------------------------------------------------------------------- NOCLIP
+function EXT.updateNoclip()
+    local enabled = getgenv().aim_settings.noclip_enabled
+    local character = G.LP.Character
+
+    if not enabled then
+        if next(State.noclip) ~= nil then
+            for part, value in pairs(State.noclip) do
+                if part and part.Parent then
+                    pcall(function() part.CanCollide = value end)
+                end
+            end
+            State.noclip = {}
+        end
+        return
+    end
+
+    if not character then return end
+    for _, part in ipairs(character:GetDescendants()) do
+        if part:IsA("BasePart") and part.CanCollide then
+            if State.noclip[part] == nil then
+                State.noclip[part] = part.CanCollide
+            end
+            part.CanCollide = false
+        end
+    end
+end
+
+-- --------------------------------------------------------- ESP BOX / TRACERS
+function EXT.clearEspDrawing(player)
+    local d = State.espDrawings[player]
+    if not d then return end
+    for _, obj in pairs(d) do
+        pcall(function() obj:Remove() end)
+    end
+    State.espDrawings[player] = nil
+end
+
+function EXT.clearAllEspDrawings()
+    for player, _ in pairs(State.espDrawings) do
+        EXT.clearEspDrawing(player)
+    end
+end
+
+function EXT.updateEspDrawings()
+    local s = getgenv().aim_settings
+    if not (s.esp_enabled and (s.esp_box or s.esp_tracers)) then
+        if next(State.espDrawings) ~= nil then
+            EXT.clearAllEspDrawings()
+        end
+        return
+    end
+
+    local camera = workspace.CurrentCamera or G.Cam
+    if not camera then return end
+
+    local origin
+    if s.esp_tracer_origin == "Mouse" then
+        origin = G.UIS:GetMouseLocation()
+    elseif s.esp_tracer_origin == "Center" then
+        origin = Vector2.new(camera.ViewportSize.X / 2, camera.ViewportSize.Y / 2)
+    else
+        origin = Vector2.new(camera.ViewportSize.X / 2, camera.ViewportSize.Y)
+    end
+
+    local seen = {}
+
+    for _, player in ipairs(G.Plr:GetPlayers()) do
+        local character = player.Character
+        local root = character and character:FindFirstChild("HumanoidRootPart")
+        local humanoid = character and character:FindFirstChildOfClass("Humanoid")
+        local show = player ~= G.LP and root ~= nil and humanoid ~= nil and humanoid.Health > 0
+
+        if show and s.esp_hide_team and G.LP.Team and player.Team == G.LP.Team then
+            show = false
+        end
+
+        if show then
+            local distance = (root.Position - camera.CFrame.Position).Magnitude
+            if distance > (s.esp_max_distance or 1000) then
+                show = false
+            end
+        end
+
+        if show then
+            local top, topOn = camera:WorldToViewportPoint(root.Position + Vector3.new(0, 3, 0))
+            local bottom, bottomOn = camera:WorldToViewportPoint(root.Position - Vector3.new(0, 3.5, 0))
+
+            -- Обе точки должны быть перед камерой. Если нижняя оказывается
+            -- позади (Z <= 0), её экранные координаты вырождаются, и рамка
+            -- с трассером растягиваются на весь экран.
+            local sane = top.Z > 0 and bottom.Z > 0
+            if sane then
+                local viewport = camera.ViewportSize
+                local h = math.abs(bottom.Y - top.Y)
+                -- Отсекаем заведомо битую проекцию у самого края видимости
+                if h > viewport.Y * 2.5 or h < 1 then
+                    sane = false
+                end
+            end
+
+            if (topOn or bottomOn) and sane then
+                seen[player] = true
+                local d = State.espDrawings[player]
+                if not d then
+                    d = {}
+                    d.box = Drawing.new("Square")
+                    d.box.Thickness = 1
+                    d.box.Filled = false
+                    d.box.Transparency = 1
+                    d.tracer = Drawing.new("Line")
+                    d.tracer.Thickness = 1
+                    d.tracer.Transparency = 1
+                    State.espDrawings[player] = d
+                end
+
+                local color
+                if s.esp_team_color and player.Team then
+                    color = player.Team.TeamColor.Color
+                else
+                    color = s.esp_chams_color
+                end
+
+                local height = math.abs(bottom.Y - top.Y)
+                local width = math.max(height / 2, 4)
+
+                d.box.Visible = s.esp_box
+                if s.esp_box then
+                    d.box.Color = color
+                    d.box.Size = Vector2.new(width, height)
+                    d.box.Position = Vector2.new(top.X - width / 2, top.Y)
+                end
+
+                d.tracer.Visible = s.esp_tracers
+                if s.esp_tracers then
+                    d.tracer.Color = color
+                    d.tracer.From = origin
+                    d.tracer.To = Vector2.new(bottom.X, bottom.Y)
+                end
+            end
+        end
+    end
+
+    for player, _ in pairs(State.espDrawings) do
+        if not seen[player] then
+            EXT.clearEspDrawing(player)
+        end
+    end
+end
+
+-- ----------------------------------------------------------- ПАНИКА (PANIC)
+EXT.PANIC_KEYS = {
+    "enabled", "esp_enabled", "esp_box", "esp_tracers", "target_esp", "target_hud",
+    "friend_markers", "arrows", "rainbow_fov", "rainbow_crosshair", "jump_circle_enabled",
+    "cosmetic_enabled", "china_hat", "china_hat_friends", "trails_enabled",
+    "tp_walk_enabled", "target_strafe_enabled", "infinite_jump_enabled", "spider_enabled",
+    "air_stuck_enabled", "smooth_fall_enabled", "speed_enabled", "safe_walk_enabled",
+    "fly_enabled", "clumsy_enabled", "freecam_enabled", "noclip_enabled", "anti_fling",
+    "fullbright", "always_day", "world_tweaks_enabled", "hitboxes_enabled",
+    "viewmodel_enabled", "esp_chams", "esp_glow_chams"
+}
+
+function EXT.panic()
+    for _, key in ipairs(EXT.PANIC_KEYS) do
+        getgenv().aim_settings[key] = false
+    end
+    refreshUIFromSettings()
+    EXT.clearAllEspDrawings()
+    EXT.notify("Паника: все функции выключены", "error")
+end
+
+-- ------------------------------------------------------------- ОКНО ДРУЗЕЙ
+EXT.FriendsWindow = Instance.new("Frame", ScreenGui)
+EXT.FriendsWindow.Name = "FriendsWindow"
+EXT.FriendsWindow.Size = UDim2.new(0, 300, 0, 380)
+EXT.FriendsWindow.Position = UDim2.new(0.5, -150, 0.5, -190)
+EXT.FriendsWindow.BackgroundColor3 = THEME.PANEL_BG
+EXT.FriendsWindow.BorderSizePixel = 0
+EXT.FriendsWindow.Visible = false
+EXT.FriendsWindow.Active = true
+Instance.new("UICorner", EXT.FriendsWindow).CornerRadius = UDim.new(0, 10)
+
+local friendsStroke = Instance.new("UIStroke", EXT.FriendsWindow)
+friendsStroke.Color = THEME.PANEL_STROKE
+friendsStroke.Thickness = 1.5
+
+local friendsTitle = Instance.new("TextLabel", EXT.FriendsWindow)
+friendsTitle.Size = UDim2.new(1, -40, 0, 34)
+friendsTitle.Position = UDim2.new(0, 14, 0, 4)
+friendsTitle.BackgroundTransparency = 1
+friendsTitle.Text = "Friends"
+friendsTitle.TextColor3 = THEME.TEXT_TITLE
+friendsTitle.Font = Enum.Font.GothamBold
+friendsTitle.TextSize = 15
+friendsTitle.TextXAlignment = Enum.TextXAlignment.Left
+
+local friendsClose = Instance.new("TextButton", EXT.FriendsWindow)
+friendsClose.Size = UDim2.new(0, 20, 0, 20)
+friendsClose.Position = UDim2.new(1, -28, 0, 11)
+friendsClose.BackgroundColor3 = THEME.RED_CROSS
+friendsClose.Text = "×"
+friendsClose.TextColor3 = Color3.fromRGB(255, 255, 255)
+friendsClose.Font = Enum.Font.GothamBold
+friendsClose.TextSize = 14
+friendsClose.AutoButtonColor = false
+Instance.new("UICorner", friendsClose).CornerRadius = UDim.new(1, 0)
+
+-- Поиск по игрокам сервера
+local friendsSearchFrame = Instance.new("Frame", EXT.FriendsWindow)
+friendsSearchFrame.Size = UDim2.new(1, -28, 0, 26)
+friendsSearchFrame.Position = UDim2.new(0, 14, 0, 40)
+friendsSearchFrame.BackgroundColor3 = THEME.MODULE_BG
+friendsSearchFrame.BorderSizePixel = 0
+Instance.new("UICorner", friendsSearchFrame).CornerRadius = UDim.new(0, 6)
+Instance.new("UIStroke", friendsSearchFrame).Color = THEME.MODULE_STROKE
+
+EXT.FriendsSearch = Instance.new("TextBox", friendsSearchFrame)
+EXT.FriendsSearch.Size = UDim2.new(1, -14, 1, -4)
+EXT.FriendsSearch.Position = UDim2.new(0, 7, 0, 2)
+EXT.FriendsSearch.BackgroundTransparency = 1
+EXT.FriendsSearch.Text = ""
+EXT.FriendsSearch.PlaceholderText = "Поиск игрока на сервере..."
+EXT.FriendsSearch.TextColor3 = THEME.TEXT_TITLE
+EXT.FriendsSearch.PlaceholderColor3 = THEME.TEXT_DIM
+EXT.FriendsSearch.Font = Enum.Font.Gotham
+EXT.FriendsSearch.TextSize = 11
+EXT.FriendsSearch.TextXAlignment = Enum.TextXAlignment.Left
+EXT.FriendsSearch.ClearTextOnFocus = false
+
+local serverLabel = Instance.new("TextLabel", EXT.FriendsWindow)
+serverLabel.Size = UDim2.new(1, -28, 0, 16)
+serverLabel.Position = UDim2.new(0, 14, 0, 72)
+serverLabel.BackgroundTransparency = 1
+serverLabel.Text = "Игроки на сервере"
+serverLabel.TextColor3 = THEME.TEXT_DIM
+serverLabel.Font = Enum.Font.Gotham
+serverLabel.TextSize = 10
+serverLabel.TextXAlignment = Enum.TextXAlignment.Left
+
+EXT.ServerList = Instance.new("ScrollingFrame", EXT.FriendsWindow)
+EXT.ServerList.Size = UDim2.new(1, -28, 0, 140)
+EXT.ServerList.Position = UDim2.new(0, 14, 0, 90)
+EXT.ServerList.BackgroundColor3 = Color3.fromRGB(24, 24, 30)
+EXT.ServerList.BorderSizePixel = 0
+EXT.ServerList.ScrollBarThickness = 4
+EXT.ServerList.ScrollBarImageColor3 = Color3.fromRGB(80, 80, 80)
+EXT.ServerList.CanvasSize = UDim2.new(0, 0, 0, 0)
+Instance.new("UICorner", EXT.ServerList).CornerRadius = UDim.new(0, 6)
+
+local serverLayout = Instance.new("UIListLayout", EXT.ServerList)
+serverLayout.SortOrder = Enum.SortOrder.LayoutOrder
+serverLayout.Padding = UDim.new(0, 2)
+
+EXT.FriendsCountLabel = Instance.new("TextLabel", EXT.FriendsWindow)
+EXT.FriendsCountLabel.Size = UDim2.new(1, -28, 0, 16)
+EXT.FriendsCountLabel.Position = UDim2.new(0, 14, 0, 236)
+EXT.FriendsCountLabel.BackgroundTransparency = 1
+EXT.FriendsCountLabel.Text = "Мои друзья (0)"
+EXT.FriendsCountLabel.TextColor3 = THEME.TEXT_DIM
+EXT.FriendsCountLabel.Font = Enum.Font.Gotham
+EXT.FriendsCountLabel.TextSize = 10
+EXT.FriendsCountLabel.TextXAlignment = Enum.TextXAlignment.Left
+
+EXT.FriendsList = Instance.new("ScrollingFrame", EXT.FriendsWindow)
+EXT.FriendsList.Size = UDim2.new(1, -28, 0, 120)
+EXT.FriendsList.Position = UDim2.new(0, 14, 0, 254)
+EXT.FriendsList.BackgroundColor3 = Color3.fromRGB(24, 24, 30)
+EXT.FriendsList.BorderSizePixel = 0
+EXT.FriendsList.ScrollBarThickness = 4
+EXT.FriendsList.ScrollBarImageColor3 = Color3.fromRGB(80, 80, 80)
+EXT.FriendsList.CanvasSize = UDim2.new(0, 0, 0, 0)
+Instance.new("UICorner", EXT.FriendsList).CornerRadius = UDim.new(0, 6)
+
+local friendsLayout = Instance.new("UIListLayout", EXT.FriendsList)
+friendsLayout.SortOrder = Enum.SortOrder.LayoutOrder
+friendsLayout.Padding = UDim.new(0, 2)
+
+EXT.makeHudDraggable(EXT.FriendsWindow, "friends_window")
+
+-- Строка списка: имя + кнопка действия
+function EXT.makeFriendRow(parent, text, subText, actionText, actionColor, order, callback)
+    local row = Instance.new("Frame", parent)
+    row.Size = UDim2.new(1, -8, 0, 28)
+    row.BackgroundColor3 = Color3.fromRGB(38, 38, 46)
+    row.BorderSizePixel = 0
+    row.LayoutOrder = order
+    Instance.new("UICorner", row).CornerRadius = UDim.new(0, 5)
+
+    local name = Instance.new("TextLabel", row)
+    name.Size = UDim2.new(1, -70, 1, 0)
+    name.Position = UDim2.new(0, 8, 0, 0)
+    name.BackgroundTransparency = 1
+    name.Text = subText ~= "" and (text .. "  (" .. subText .. ")") or text
+    name.TextColor3 = THEME.TEXT_TITLE
+    name.Font = Enum.Font.Gotham
+    name.TextSize = 11
+    name.TextXAlignment = Enum.TextXAlignment.Left
+    name.TextTruncate = Enum.TextTruncate.AtEnd
+
+    local btn = Instance.new("TextButton", row)
+    btn.Size = UDim2.new(0, 54, 0, 20)
+    btn.Position = UDim2.new(1, -60, 0.5, -10)
+    btn.BackgroundColor3 = actionColor
+    btn.Text = actionText
+    btn.TextColor3 = Color3.fromRGB(255, 255, 255)
+    btn.Font = Enum.Font.GothamBold
+    btn.TextSize = 10
+    btn.AutoButtonColor = false
+    Instance.new("UICorner", btn).CornerRadius = UDim.new(0, 4)
+
+    btn.MouseButton1Click:Connect(callback)
+    return row
+end
+
+function EXT.refreshFriendsWindow()
+    if not EXT.FriendsWindow.Visible then return end
+
+    local query = string.lower(EXT.FriendsSearch.Text or "")
+
+    for _, child in ipairs(EXT.ServerList:GetChildren()) do
+        if child:IsA("Frame") then child:Destroy() end
+    end
+    for _, child in ipairs(EXT.FriendsList:GetChildren()) do
+        if child:IsA("Frame") then child:Destroy() end
+    end
+
+    -- Все игроки сервера, кроме себя, с фильтром по поиску
+    local order = 1
+    for _, player in ipairs(G.Plr:GetPlayers()) do
+        if player ~= G.LP then
+            local nameLower = string.lower(player.Name)
+            local displayLower = string.lower(player.DisplayName or "")
+            local match = query == ""
+                or string.find(nameLower, query, 1, true)
+                or string.find(displayLower, query, 1, true)
+
+            if match then
+                local already = isFriend(player.Name)
+                local subText = (player.DisplayName and player.DisplayName ~= player.Name)
+                    and player.DisplayName or ""
+                EXT.makeFriendRow(
+                    EXT.ServerList, player.Name, subText,
+                    already and "В друзьях" or "Добавить",
+                    already and Color3.fromRGB(70, 70, 80) or THEME.GREEN_CHECK,
+                    order,
+                    function()
+                        if isFriend(player.Name) then return end
+                        toggleFriend(player.Name)
+                        EXT.notify("Добавлен в друзья: " .. player.Name, "ok")
+                        EXT.refreshFriendsWindow()
+                    end
+                )
+                order = order + 1
+            end
+        end
+    end
+    EXT.ServerList.CanvasSize = UDim2.new(0, 0, 0, serverLayout.AbsoluteContentSize.Y + 6)
+
+    -- Мои друзья (в том числе оффлайн)
+    local friends = getgenv().aim_settings.friends
+    EXT.FriendsCountLabel.Text = "Мои друзья (" .. #friends .. ")"
+
+    for i, friendName in ipairs(friends) do
+        local online = G.Plr:FindFirstChild(friendName) ~= nil
+        EXT.makeFriendRow(
+            EXT.FriendsList, friendName, online and "онлайн" or "оффлайн",
+            "Удалить", THEME.RED_CROSS, i,
+            function()
+                toggleFriend(friendName)
+                EXT.notify("Удалён из друзей: " .. friendName, "error")
+                EXT.refreshFriendsWindow()
+            end
+        )
+    end
+    EXT.FriendsList.CanvasSize = UDim2.new(0, 0, 0, friendsLayout.AbsoluteContentSize.Y + 6)
+end
+
+EXT.FriendsSearch:GetPropertyChangedSignal("Text"):Connect(function()
+    EXT.refreshFriendsWindow()
+end)
+
+friendsClose.MouseButton1Click:Connect(function()
+    getgenv().aim_settings.friends_window = false
+    EXT.FriendsWindow.Visible = false
+    refreshUIFromSettings()
+end)
+
+function EXT.updateFriendsWindow()
+    local shouldShow = getgenv().aim_settings.friends_window
+    if EXT.FriendsWindow.Visible ~= shouldShow then
+        EXT.FriendsWindow.Visible = shouldShow
+        if shouldShow then
+            EXT.refreshFriendsWindow()
+        end
+    end
+end
+
+State.connections.friendsPlayerAdded = G.Plr.PlayerAdded:Connect(function()
+    task.wait(0.2)
+    EXT.refreshFriendsWindow()
+end)
+
+State.connections.friendsPlayerRemoving = G.Plr.PlayerRemoving:Connect(function()
+    task.wait(0.2)
+    EXT.refreshFriendsWindow()
+end)
+
+end -- конец блока EXTENSIONS
+
+-- ------------------------------------------------------------ ПОИСК ПО МЕНЮ
+do
+EXT.SearchBar = Instance.new("Frame", ScreenGui)
+EXT.SearchBar.Name = "ModuleSearch"
+EXT.SearchBar.Size = UDim2.new(0, 260, 0, 30)
+EXT.SearchBar.Position = UDim2.new(0.5, -130, 0, 8)
+EXT.SearchBar.BackgroundColor3 = THEME.PANEL_BG
+EXT.SearchBar.BorderSizePixel = 0
+EXT.SearchBar.Active = true
+Instance.new("UICorner", EXT.SearchBar).CornerRadius = UDim.new(0, 8)
+
+local searchStroke = Instance.new("UIStroke", EXT.SearchBar)
+searchStroke.Color = THEME.PANEL_STROKE
+searchStroke.Thickness = 1.5
+
+EXT.SearchBox = Instance.new("TextBox", EXT.SearchBar)
+EXT.SearchBox.Size = UDim2.new(1, -20, 1, -6)
+EXT.SearchBox.Position = UDim2.new(0, 10, 0, 3)
+EXT.SearchBox.BackgroundTransparency = 1
+EXT.SearchBox.Text = ""
+EXT.SearchBox.PlaceholderText = "Поиск модуля..."
+EXT.SearchBox.TextColor3 = THEME.TEXT_TITLE
+EXT.SearchBox.PlaceholderColor3 = THEME.TEXT_DIM
+EXT.SearchBox.Font = Enum.Font.Gotham
+EXT.SearchBox.TextSize = 12
+EXT.SearchBox.ClearTextOnFocus = false
+
+EXT.makeHudDraggable(EXT.SearchBar, "search_bar")
+
+-- Поиск идёт и по названиям модулей, и по их подпунктам.
+-- Если совпал подпункт, модуль разворачивается и показывает только его.
+function EXT.applyModuleSearch()
+    local query = string.lower(EXT.SearchBox.Text or "")
+
+    for _, entry in ipairs(State.moduleIndex) do
+        local container = entry.container
+        local moduleData = entry.module
+
+        if container and container.Parent and moduleData then
+            if query == "" then
+                container.Visible = true
+                for _, item in ipairs(moduleData.searchEntries) do
+                    item.frame.Visible = true
+                end
+                for _, section in ipairs(moduleData.sections) do
+                    section.Visible = true
+                end
+                -- Свернуть обратно только то, что развернул сам поиск
+                if moduleData.searchExpanded then
+                    moduleData.searchExpanded = false
+                    moduleData.expanded = false
+                    if moduleData.arrowLbl then
+                        moduleData.arrowLbl.Rotation = 0
+                    end
+                    container.Size = UDim2.new(1, -16, 0, 34)
+                end
+            else
+                local nameMatch = string.find(string.lower(entry.name), query, 1, true) ~= nil
+                local settingMatch = false
+
+                for _, item in ipairs(moduleData.searchEntries) do
+                    local hit = string.find(string.lower(item.name), query, 1, true) ~= nil
+                    item.frame.Visible = nameMatch or hit
+                    if hit then settingMatch = true end
+                end
+
+                -- При активном поиске заголовки групп прячем: часть
+                -- их содержимого отфильтрована, и они висели бы пустыми
+                for _, section in ipairs(moduleData.sections) do
+                    section.Visible = nameMatch
+                end
+
+                container.Visible = nameMatch or settingMatch
+
+                if settingMatch and not moduleData.expanded then
+                    moduleData.expanded = true
+                    moduleData.searchExpanded = true
+                    if moduleData.arrowLbl then
+                        moduleData.arrowLbl.Rotation = 90
+                    end
+                end
+            end
+
+            -- Высоту считаем на следующем кадре: UIListLayout пересчитывает
+            -- AbsoluteContentSize уже после смены видимости подпунктов.
+            if moduleData.expanded and container.Visible then
+                task.defer(function()
+                    if container and container.Parent and moduleData.expanded then
+                        container.Size = UDim2.new(1, -16, 0,
+                            34 + moduleData.setListLayout.AbsoluteContentSize.Y)
+                    end
+                end)
+            end
+        end
+    end
+end
+
+EXT.SearchBox:GetPropertyChangedSignal("Text"):Connect(EXT.applyModuleSearch)
+
+end -- конец блока поиска
+
+-- ============================================================================
+-- [[ HUD 2.0 ]] Arraylist активных модулей + единый стиль карточек.
+-- Обёрнуто в do...end, чтобы служебные локальные освобождали регистры.
+-- ============================================================================
+do
+
+local TextSvc = game:GetService("TextService")
+
+-- Единый стиль карточки: скругление, обводка, лёгкая тень
+function EXT.styleCard(frame, radius)
+    frame.BackgroundColor3 = Color3.fromRGB(14, 14, 18)
+    frame.BackgroundTransparency = 0.08
+    frame.BorderSizePixel = 0
+
+    local corner = frame:FindFirstChildOfClass("UICorner") or Instance.new("UICorner", frame)
+    corner.CornerRadius = UDim.new(0, radius or 8)
+
+    local stroke = frame:FindFirstChildOfClass("UIStroke") or Instance.new("UIStroke", frame)
+    stroke.Color = Color3.fromRGB(40, 40, 50)
+    stroke.Thickness = 1
+    stroke.Transparency = 0.25
+    return frame
+end
+
+-- Цвет по позиции в списке: плавный перелив от цвета клиента
+function EXT.gradientColor(index, total)
+    local base = getClientColor()
+    local h, sat, v = Color3.toHSV(base)
+    if not getgenv().aim_settings.hud_arraylist_gradient then
+        return base
+    end
+    local shift = (total > 1) and ((index - 1) / math.max(total - 1, 1)) * 0.16 or 0
+    return Color3.fromHSV((h + shift) % 1, sat, v)
+end
+
+-- ------------------------------------------------------------------ ARRAYLIST
+EXT.Arraylist = Instance.new("Frame", HudScreenGui)
+EXT.Arraylist.Name = "Arraylist"
+EXT.Arraylist.Size = UDim2.new(0, 220, 0, 400)
+EXT.Arraylist.Position = UDim2.new(1, -230, 0, 46)
+EXT.Arraylist.BackgroundTransparency = 1
+EXT.Arraylist.BorderSizePixel = 0
+EXT.Arraylist.Visible = false
+EXT.Arraylist.Active = true
+
+local arrayLayout = Instance.new("UIListLayout", EXT.Arraylist)
+arrayLayout.SortOrder = Enum.SortOrder.LayoutOrder
+arrayLayout.Padding = UDim.new(0, 3)
+arrayLayout.HorizontalAlignment = Enum.HorizontalAlignment.Right
+
+EXT.makeHudDraggable(EXT.Arraylist, "arraylist")
+
+local arrayRows = {}
+local arraySignature = nil
+
+local function measure(text)
+    local ok, size = pcall(function()
+        return TextSvc:GetTextSize(text, 14, Enum.Font.GothamBold, Vector2.new(4000, 100))
+    end)
+    if ok and size then return size.X end
+    return #text * 8
+end
+
+-- Список активных модулей: имя + ширина для сортировки
+local function collectActive()
+    local s = getgenv().aim_settings
+    local items = {}
+    for key, label in pairs(MODULE_NAMES) do
+        if s[key] == true and key ~= "hud_enabled" and key ~= "clickgui_enabled"
+            and key ~= "notifications_enabled" and key ~= "unload_script"
+            and key ~= "hud_arraylist" then
+            table.insert(items, {name = label, width = measure(label)})
+        end
+    end
+
+    local mode = s.hud_arraylist_sort
+    table.sort(items, function(a, b)
+        if mode == "Name" then
+            return a.name < b.name
+        elseif mode == "Short" then
+            if a.width == b.width then return a.name < b.name end
+            return a.width < b.width
+        end
+        if a.width == b.width then return a.name < b.name end
+        return a.width > b.width
+    end)
+    return items
+end
+
+local function buildRow(item, index)
+    local row = Instance.new("Frame", EXT.Arraylist)
+    row.Name = "Row_" .. item.name
+    row.Size = UDim2.new(0, item.width + 22, 0, 18)
+    row.BackgroundColor3 = Color3.fromRGB(14, 14, 18)
+    row.BackgroundTransparency = 0.15
+    row.BorderSizePixel = 0
+    row.LayoutOrder = index
+
+    local label = Instance.new("TextLabel", row)
+    label.Name = "Label"
+    label.Size = UDim2.new(1, -12, 1, 0)
+    label.Position = UDim2.new(0, 6, 0, 0)
+    label.BackgroundTransparency = 1
+    label.Text = item.name
+    label.TextColor3 = Color3.fromRGB(255, 255, 255)
+    label.Font = Enum.Font.GothamBold
+    label.TextSize = 13
+    label.TextXAlignment = Enum.TextXAlignment.Left
+    label.TextStrokeTransparency = 0.6
+
+    -- Акцентная полоса справа, как в классических клиентах
+    local bar = Instance.new("Frame", row)
+    bar.Name = "Bar"
+    bar.Size = UDim2.new(0, 2, 1, 0)
+    bar.Position = UDim2.new(1, -2, 0, 0)
+    bar.BorderSizePixel = 0
+    bar.BackgroundColor3 = getClientColor()
+
+    -- Въезд справа
+    row.Position = UDim2.new(0, 40, 0, 0)
+    label.TextTransparency = 1
+    tw(label, {TextTransparency = 0}, 0.22)
+
+    return row
+end
+
+function EXT.updateArraylist()
+    local s = getgenv().aim_settings
+    local show = s.hud_arraylist
+    EXT.Arraylist.Visible = show
+
+    if not show then
+        if next(arrayRows) ~= nil then
+            for _, row in pairs(arrayRows) do
+                if row then row:Destroy() end
+            end
+            arrayRows = {}
+            arraySignature = nil
+        end
+        return
+    end
+
+    local items = collectActive()
+
+    local signature = tostring(s.hud_arraylist_sort)
+    for _, item in ipairs(items) do
+        signature = signature .. item.name .. ";"
+    end
+
+    -- Пересобираем только при изменении набора, иначе каждый кадр
+    -- уничтожались бы и создавались все строки.
+    if signature ~= arraySignature then
+        arraySignature = signature
+        for _, row in pairs(arrayRows) do
+            if row then row:Destroy() end
+        end
+        arrayRows = {}
+        for index, item in ipairs(items) do
+            arrayRows[index] = buildRow(item, index)
+        end
+    end
+
+    -- Цвета обновляем каждый кадр: цвет клиента и радуга должны быть живыми
+    local total = #items
+    for index, row in pairs(arrayRows) do
+        if row and row.Parent then
+            local color = EXT.gradientColor(index, total)
+            local bar = row:FindFirstChild("Bar")
+            if bar then bar.BackgroundColor3 = color end
+            local label = row:FindFirstChild("Label")
+            if label and s.hud_arraylist_colored_text then
+                label.TextColor3 = color
+            elseif label then
+                label.TextColor3 = Color3.fromRGB(255, 255, 255)
+            end
+        end
+    end
+end
+
+-- ------------------------------------------------- ПЕРЕОФОРМЛЕНИЕ HUD-КАРТОЧЕК
+EXT.styleCard(WatermarkFrame, 8)
+EXT.styleCard(KeybindList, 10)
+EXT.styleCard(SpeedLabel, 8)
+EXT.styleCard(PlayerInfoLabel, 8)
+EXT.styleCard(TargetHudFrame, 10)
+
+-- Акцентная полоска слева у карточек
+local function addAccent(frame, name)
+    local accent = Instance.new("Frame", frame)
+    accent.Name = name
+    accent.Size = UDim2.new(0, 2, 1, -10)
+    accent.Position = UDim2.new(0, 0, 0, 5)
+    accent.BorderSizePixel = 0
+    accent.BackgroundColor3 = getClientColor()
+    accent.Visible = false
+    accent.ZIndex = 5
+    Instance.new("UICorner", accent).CornerRadius = UDim.new(1, 0)
+    return accent
+end
+
+EXT.accents = {
+    watermark = addAccent(WatermarkFrame, "Accent"),
+    keybinds = addAccent(KeybindList, "Accent"),
+    speed = addAccent(SpeedLabel, "Accent"),
+    playerInfo = addAccent(PlayerInfoLabel, "Accent")
+}
+
+-- Текст в карточках должен отступать от акцентной полосы
+SpeedLabel.TextXAlignment = Enum.TextXAlignment.Left
+local speedPad = Instance.new("UIPadding", SpeedLabel)
+speedPad.PaddingLeft = UDim.new(0, 12)
+
+EXT.sessionStart = tick()
+
+function EXT.formatSession()
+    local elapsed = math.floor(tick() - EXT.sessionStart)
+    return string.format("%02d:%02d", math.floor(elapsed / 60), elapsed % 60)
+end
+
+-- Цвет метрики: зелёный - хорошо, жёлтый - средне, красный - плохо
+function EXT.metricColor(value, good, bad)
+    if value <= good then return Color3.fromRGB(90, 210, 120) end
+    if value >= bad then return Color3.fromRGB(235, 85, 85) end
+    return Color3.fromRGB(240, 200, 90)
+end
+
+function EXT.updateHudStyle()
+    local color = getClientColor()
+    local show = getgenv().aim_settings.hud_accents
+    for _, accent in pairs(EXT.accents) do
+        if accent and accent.Parent then
+            accent.Visible = show
+            accent.BackgroundColor3 = color
+        end
+    end
+end
+
+-- Возврат всех окон и HUD на исходные места
+EXT.DEFAULT_POSITIONS = {
+    watermark = UDim2.new(0, 10, 0, 10),
+    keybinds = UDim2.new(1, -190, 0, 10),
+    speed_display = UDim2.new(0.5, -125, 0, 10),
+    player_info = UDim2.new(0, 10, 1, -70),
+    arraylist = UDim2.new(1, -230, 0, 46),
+    notifications = UDim2.new(1, -280, 0, 240),
+    friends_window = UDim2.new(0.5, -150, 0.5, -190),
+    search_bar = UDim2.new(0.5, -130, 0, 8),
+    target_hud = UDim2.new(0.5, -106, 0.7, 0)
+}
+
+function EXT.resetHudLayout()
+    for key, gui in pairs(State.draggables) do
+        local def = EXT.DEFAULT_POSITIONS[key]
+        if gui and gui.Parent and def then
+            gui.Position = def
+            EXT.saveUiPosition(key, def)
+        end
+    end
+    EXT.notify("Расстановка HUD сброшена", "ok")
+end
+
+end
+
+-- ============================================================================
+-- [[ MODULE GLOW ]] Подсветка модуля целиком при наведении.
+-- Слой лежит внутри кнопки под текстом, поэтому светится сама функция,
+-- а не отдельная фигура рядом с курсором.
+-- ============================================================================
+do
+
+EXT.guiInset = 0
+pcall(function()
+    EXT.guiInset = game:GetService("GuiService"):GetGuiInset().Y
+end)
+
+-- GetMouseLocation отдаёт координаты от левого верхнего угла окна, вместе
+-- с верхней панелью Roblox. ScreenGui с IgnoreGuiInset = true имеет такое же
+-- начало координат, а у обычного ScreenGui начало сдвинуто вниз на высоту
+-- панели, поэтому там инсет нужно вычитать. Нужно для Mouse Glow.
+function EXT.mousePosition(ignoresInset)
+    local m = G.UIS:GetMouseLocation()
+    if ignoresInset then
+        return Vector2.new(m.X, m.Y)
+    end
+    return Vector2.new(m.X, m.Y - EXT.guiInset)
+end
+
+local hovered = nil
+local hoverAmount = 0
+local allLayers = {}
+
+function EXT.attachModuleGlow(btn)
+    local glow = Instance.new("Frame", btn)
+    glow.Name = "ModuleGlow"
+    glow.Size = UDim2.new(1, 0, 1, 0)
+    glow.BackgroundColor3 = getClientColor()
+    glow.BackgroundTransparency = 1
+    glow.BorderSizePixel = 0
+    glow.ZIndex = 0
+    Instance.new("UICorner", glow).CornerRadius = UDim.new(0, 6)
+
+    -- Мягкий блик, пробегающий вдоль кнопки: подсветка не выглядит плоской
+    local gradient = Instance.new("UIGradient", glow)
+    gradient.Transparency = NumberSequence.new({
+        NumberSequenceKeypoint.new(0.00, 0.55),
+        NumberSequenceKeypoint.new(0.50, 0.00),
+        NumberSequenceKeypoint.new(1.00, 0.55)
+    })
+
+    local layers = {glow = glow, gradient = gradient}
+    table.insert(allLayers, layers)
+    return layers
+end
+
+local function hideLayers(layers)
+    if not layers then return end
+    layers.glow.BackgroundTransparency = 1
+end
+
+-- Нужно Mouse Glow, чтобы включаться только над модулями
+function EXT.isModuleHovered()
+    return hovered ~= nil
+end
+
+function EXT.setHoveredModule(btn, layers)
+    if btn then
+        -- Гасим все чужие наборы: при быстром переходе между модулями
+        -- события MouseEnter и MouseLeave приходят вперемешку и подсветка
+        -- залипала на покинутой кнопке.
+        for _, other in ipairs(allLayers) do
+            if other ~= layers then
+                hideLayers(other)
+            end
+        end
+        hovered = {btn = btn, layers = layers}
+    elseif hovered and hovered.layers == layers then
+        hideLayers(layers)
+        hovered = nil
+        hoverAmount = 0
+    end
+end
+
+function EXT.updateModuleGlow(dt)
+    local s = getgenv().aim_settings
+    local active = hovered ~= nil and ScreenGui.Enabled and s.clickgui_module_glow
+
+    hoverAmount = hoverAmount + ((active and 1 or 0) - hoverAmount) * math.clamp(dt * 12, 0, 1)
+
+    if not hovered then return end
+    local btn = hovered.btn
+    local layers = hovered.layers
+    if not (btn and btn.Parent and layers) then
+        hovered = nil
+        return
+    end
+
+    if hoverAmount < 0.01 then
+        hideLayers(layers)
+        return
+    end
+
+    local strength = s.clickgui_module_glow_strength or 0.25
+    layers.glow.BackgroundColor3 = getClientColor()
+    layers.glow.BackgroundTransparency = 1 - (strength * hoverAmount)
+
+    -- Блик идёт слева направо и зацикливается
+    local speed = s.clickgui_module_glow_speed or 0.5
+    layers.gradient.Offset = Vector2.new(((tick() * speed) % 2) - 1, 0)
+end
+
+end
+
+-- ============================================================================
+-- [[ MOUSE GLOW ]] Свечение у курсора в стиле liquid glass.
+-- Лежит в собственном ScreenGui с DisplayOrder выше меню (100) и HUD (50),
+-- иначе панели скрипта рисуются поверх свечения и его не видно.
+--
+-- Стекло собрано из слоёв, потому что настоящего блюра под элементом
+-- Roblox UI не даёт: тело + вертикальный градиент + блик + светлая кромка.
+-- ============================================================================
+do
+
+EXT.GlowGui = Instance.new("ScreenGui", game:GetService("CoreGui"))
+EXT.GlowGui.Name = "PremiumMouseGlow"
+EXT.GlowGui.ResetOnSpawn = false
+EXT.GlowGui.IgnoreGuiInset = true
+EXT.GlowGui.ZIndexBehavior = Enum.ZIndexBehavior.Sibling
+EXT.GlowGui.DisplayOrder = 200
+
+EXT.MouseGlow = Instance.new("Frame", EXT.GlowGui)
+EXT.MouseGlow.Name = "MouseGlow"
+EXT.MouseGlow.AnchorPoint = Vector2.new(0.5, 0.5)
+EXT.MouseGlow.Size = UDim2.new(0, 0, 0, 0)
+EXT.MouseGlow.BackgroundTransparency = 1
+EXT.MouseGlow.BorderSizePixel = 0
+EXT.MouseGlow.Visible = false
+EXT.MouseGlow.ZIndex = 900
+
+-- Внешний ореол: мягкое цветное свечение вокруг стекла
+local halo = Instance.new("Frame", EXT.MouseGlow)
+halo.Name = "Halo"
+halo.AnchorPoint = Vector2.new(0.5, 0.5)
+halo.Position = UDim2.new(0.5, 0, 0.5, 0)
+halo.Size = UDim2.new(1.45, 0, 1.45, 0)
+halo.BackgroundColor3 = getClientColor()
+halo.BackgroundTransparency = 1
+halo.BorderSizePixel = 0
+halo.ZIndex = 899
+Instance.new("UICorner", halo).CornerRadius = UDim.new(1, 0)
+
+-- Тело стекла
+local body = Instance.new("Frame", EXT.MouseGlow)
+body.Name = "Body"
+body.AnchorPoint = Vector2.new(0.5, 0.5)
+body.Position = UDim2.new(0.5, 0, 0.5, 0)
+body.Size = UDim2.new(1, 0, 1, 0)
+body.BackgroundColor3 = Color3.fromRGB(255, 255, 255)
+body.BackgroundTransparency = 1
+body.BorderSizePixel = 0
+body.ZIndex = 900
+Instance.new("UICorner", body).CornerRadius = UDim.new(1, 0)
+
+-- Вертикальный градиент: сверху стекло светлее, снизу уходит в цвет клиента
+local bodyGradient = Instance.new("UIGradient", body)
+bodyGradient.Rotation = 90
+
+-- Светлая кромка с переменной прозрачностью — имитация преломления по краю
+local rim = Instance.new("UIStroke", body)
+rim.Color = Color3.fromRGB(255, 255, 255)
+rim.Thickness = 1.4
+rim.Transparency = 1
+
+local rimGradient = Instance.new("UIGradient", rim)
+rimGradient.Transparency = NumberSequence.new({
+    NumberSequenceKeypoint.new(0.00, 0.15),
+    NumberSequenceKeypoint.new(0.35, 0.65),
+    NumberSequenceKeypoint.new(0.65, 0.85),
+    NumberSequenceKeypoint.new(1.00, 0.25)
+})
+
+-- Блик в левой верхней четверти
+local specular = Instance.new("Frame", EXT.MouseGlow)
+specular.Name = "Specular"
+specular.AnchorPoint = Vector2.new(0.5, 0.5)
+specular.Position = UDim2.new(0.34, 0, 0.30, 0)
+specular.Size = UDim2.new(0.42, 0, 0.30, 0)
+specular.BackgroundColor3 = Color3.fromRGB(255, 255, 255)
+specular.BackgroundTransparency = 1
+specular.BorderSizePixel = 0
+specular.Rotation = -25
+specular.ZIndex = 901
+Instance.new("UICorner", specular).CornerRadius = UDim.new(1, 0)
+
+local specGradient = Instance.new("UIGradient", specular)
+specGradient.Rotation = 90
+specGradient.Transparency = NumberSequence.new({
+    NumberSequenceKeypoint.new(0, 0.25),
+    NumberSequenceKeypoint.new(1, 1)
+})
+
+-- Точка в центре
+local dot = Instance.new("Frame", EXT.MouseGlow)
+dot.Name = "Dot"
+dot.AnchorPoint = Vector2.new(0.5, 0.5)
+dot.Position = UDim2.new(0.5, 0, 0.5, 0)
+dot.Size = UDim2.new(0, 5, 0, 5)
+dot.BackgroundColor3 = Color3.fromRGB(255, 255, 255)
+dot.BackgroundTransparency = 1
+dot.BorderSizePixel = 0
+dot.ZIndex = 903
+Instance.new("UICorner", dot).CornerRadius = UDim.new(1, 0)
+
+local amount = 0
+local hue = 0
+local prevPos = nil
+local smoothVel = Vector2.new(0, 0)
+local lastAngle = 0
+
+function EXT.updateMouseGlow(dt)
+    local s = getgenv().aim_settings
+
+    local active = s.mouse_glow
+    if active then
+        if s.mouse_glow_on_hover then
+            -- Появляется только над модулем
+            active = ScreenGui.Enabled and EXT.isModuleHovered()
+        else
+            active = ScreenGui.Enabled or s.mouse_glow_always
+        end
+    end
+
+    amount = amount + ((active and 1 or 0) - amount) * math.clamp(dt * 12, 0, 1)
+
+    if amount < 0.01 then
+        if EXT.MouseGlow.Visible then
+            EXT.MouseGlow.Visible = false
+        end
+        return
+    end
+
+    EXT.MouseGlow.Visible = true
+
+    -- Без интерполяции: свечение должно стоять ровно в курсоре
+    local target = EXT.mousePosition(EXT.GlowGui.IgnoreGuiInset)
+
+    -- Скорость курсора: по ней капля вытягивается в сторону движения.
+    -- Сглаживаем саму скорость, а не позицию, иначе свечение начало бы
+    -- отставать от курсора, чего мы как раз избегаем.
+    local velocity = Vector2.new(0, 0)
+    if prevPos and dt > 0 then
+        velocity = (target - prevPos) / dt
+    end
+    prevPos = target
+    smoothVel = smoothVel:Lerp(velocity, math.clamp(dt * 14, 0, 1))
+
+    local color
+    if s.mouse_glow_rainbow then
+        hue = (hue + dt * 0.25) % 1
+        color = Color3.fromHSV(hue, 0.75, 1)
+    else
+        color = getClientColor()
+    end
+
+    local base = (s.mouse_glow_size or 40) * amount
+    local liquid = s.mouse_glow_style == "Liquid Glass"
+
+    -- Разные частоты по осям дают лёгкую «жидкую» деформацию капли
+    local wobbleX, wobbleY = 1, 1
+    if liquid then
+        wobbleX = 1 + math.sin(tick() * 2.3) * 0.06
+        wobbleY = 1 + math.sin(tick() * 3.1 + 1.2) * 0.06
+    else
+        local pulse = 1 + math.sin(tick() * 3) * 0.05
+        wobbleX, wobbleY = pulse, pulse
+    end
+
+    -- Направленная деформация: вдоль движения растягиваем, поперёк сжимаем
+    local strength = s.mouse_glow_stretch or 1
+    local speed = smoothVel.Magnitude
+    local stretch = 1 + math.clamp(speed / 2600, 0, 0.5) * strength
+    local squash = 1 - math.clamp(speed / 3800, 0, 0.28) * strength
+
+    if speed > 25 then
+        lastAngle = math.deg(math.atan2(smoothVel.Y, smoothVel.X))
+    end
+    EXT.MouseGlow.Rotation = lastAngle
+
+    EXT.MouseGlow.Position = UDim2.new(0, target.X, 0, target.Y)
+    EXT.MouseGlow.Size = UDim2.new(0, base * wobbleX * stretch, 0, base * wobbleY * squash)
+
+    halo.BackgroundColor3 = color
+    halo.BackgroundTransparency = 1 - (liquid and 0.07 or 0.14) * amount
+
+    if liquid then
+        -- Матовое стекло: светлое по всей площади. Тёмного конца у градиента
+        -- быть не должно, иначе по краю ездит тёмный полумесяц.
+        body.BackgroundTransparency = 1 - (0.16 * amount)
+        bodyGradient.Color = ColorSequence.new({
+            ColorSequenceKeypoint.new(0, Color3.fromRGB(255, 255, 255)),
+            ColorSequenceKeypoint.new(1, tintColor(color, 1, 0.55))
+        })
+        bodyGradient.Transparency = NumberSequence.new({
+            NumberSequenceKeypoint.new(0, 0.42),
+            NumberSequenceKeypoint.new(1, 0.78)
+        })
+        -- Градиент не вращается: он задаёт постоянное освещение сверху,
+        -- лёгкое покачивание оставляет ощущение живой поверхности.
+        bodyGradient.Rotation = 90 + math.sin(tick() * 1.1) * 7
+        rimGradient.Rotation = (tick() * 28) % 360
+        rim.Transparency = 1 - (0.75 * amount)
+        rim.Thickness = 1.2
+
+        specular.BackgroundTransparency = 1 - (0.5 * amount)
+        -- Компенсируем поворот родителя, чтобы блик оставался сверху слева
+        specular.Rotation = -25 - lastAngle + math.sin(tick() * 1.7) * 6
+    else
+        body.BackgroundTransparency = 1 - (0.4 * amount)
+        bodyGradient.Color = ColorSequence.new(color)
+        bodyGradient.Transparency = NumberSequence.new(0)
+        rim.Transparency = 1 - (0.7 * amount)
+        rim.Thickness = 1.2 + math.sin(tick() * 5) * 0.35
+        specular.BackgroundTransparency = 1
+    end
+
+    local dotSize = (s.mouse_glow_dot or 5) * amount
+    dot.Size = UDim2.new(0, dotSize, 0, dotSize)
+    dot.BackgroundTransparency = 1 - (0.95 * amount)
+end
+
+end
+
 -- [[ BUILD UI ]]
+local M = {} -- ссылки на модули; одна таблица вместо ~20 локальных переменных
 local startX = 50
 local panelW = 200
 local gap = 12
@@ -4366,6 +5780,65 @@ panelAnimationState = "hidden" -- "hidden", "showing", "visible", "hiding"
 local panelAnimationProgress = 0
 local panelOriginalPositions = {}
 local panelTargetPositions = {}
+
+-- Сохранение и восстановление позиций панелей и окон.
+-- Определено здесь, а не в блоке EXTENSIONS, потому что нужен доступ
+-- к panelOriginalPositions, которая объявлена только сейчас.
+function EXT.savePanelPositions()
+    for i, panel in ipairs(State.panels) do
+        -- Живую позицию можно брать только когда меню действительно на экране.
+        -- В скрытом состоянии панели припаркованы за нижним краем (1, 100),
+        -- и сохранение оттуда записало бы мусор.
+        if panelAnimationState == "visible" then
+            local pos = panel.frame.Position
+            local anchor = panel.frame.AnchorPoint
+            local topLeftX = pos.X.Offset - (panel.frame.Size.X.Offset * anchor.X)
+            local topLeftY = pos.Y.Offset - (panel.frame.Size.Y.Offset * anchor.Y)
+            local logical = UDim2.new(pos.X.Scale, topLeftX, pos.Y.Scale, topLeftY)
+            panel.savedPosition = logical
+            panelOriginalPositions[i] = logical
+            EXT.saveUiPosition("panel_" .. panel.name, logical)
+        else
+            local logical = panel.savedPosition or panelOriginalPositions[i]
+            if logical then
+                EXT.saveUiPosition("panel_" .. panel.name, logical)
+            end
+        end
+    end
+end
+
+-- Полный снимок расстановки интерфейса. Вызывается при сохранении конфига,
+-- чтобы в него попало текущее положение окон, а не то, что осталось
+-- с последнего перетаскивания.
+function EXT.captureAllPositions()
+    for key, gui in pairs(State.draggables) do
+        if gui and gui.Parent then
+            EXT.saveUiPosition(key, gui.Position)
+        end
+    end
+    EXT.savePanelPositions()
+end
+
+function EXT.applySavedPositions()
+    for key, gui in pairs(State.draggables) do
+        if gui and gui.Parent then
+            EXT.applyUiPosition(key, gui)
+        end
+    end
+
+    for i, panel in ipairs(State.panels) do
+        local saved = getgenv().aim_settings.ui_positions["panel_" .. panel.name]
+        if saved then
+            local pos = UDim2.new(saved.xs or 0, saved.xo or 0, saved.ys or 0, saved.yo or 0)
+            panel.savedPosition = pos
+            panelOriginalPositions[i] = pos
+            if panelAnimationState == "visible" then
+                panel.frame.AnchorPoint = Vector2.new(0, 0)
+                panel.frame.Position = pos
+            end
+        end
+    end
+end
 
 local function setPanelTopLeftLayout(panel, originalPosition)
     panel.frame.AnchorPoint = Vector2.new(0, 0)
@@ -4573,154 +6046,233 @@ end
 do
 -- 1. COMBAT
 local pCombat = CategoryPanel.new("Combat", startX, 50, panelW)
-local mAimbot = pCombat:addModule("Aimbot", "enabled", true)
-pCombat:addBoolean(mAimbot, "Prediction", "prediction_enabled")
-pCombat:addBoolean(mAimbot, "Lock Target", "lock_player")
-pCombat:addBoolean(mAimbot, "WallCheck", "wall_check")
-pCombat:addBoolean(mAimbot, "Ignore Team", "ignore_team")
-pCombat:addBoolean(mAimbot, "Smooth", "smooth_enabled")
-pCombat:addBoolean(mAimbot, "Noise", "noise_enabled")
-pCombat:addBoolean(mAimbot, "Speed Display", "speed_display")
-pCombat:addSlider(mAimbot, "FOV", "fov", 10, 500, 1)
-pCombat:addSlider(mAimbot, "Predict Amount", "prediction_amount", 0, 0.5, 0.01)
-pCombat:addSlider(mAimbot, "Smooth Amount", "smooth_amount", 0.01, 1, 0.01)
-pCombat:addSlider(mAimbot, "Noise Amount", "noise_amount", 0, 0.5, 0.01)
-pCombat:addDropdown(mAimbot, "Hitbox", "hitbox", {"Head", "Body"})
-pCombat:addDropdown(mAimbot, "Priority", "priority", {"Distance", "Health", "Free"})
-pCombat:addDropdown(mAimbot, "Activation", "aim_activation", {"RMB", "LMB", "Auto"})
+M.Aimbot = pCombat:addModule("Aimbot", "enabled", true)
 
-local mHitboxes = pCombat:addModule("Hitboxes", "hitboxes_enabled", true)
-pCombat:addDropdown(mHitboxes, "Part", "hitboxes_part", {"Head", "Body"})
-pCombat:addSlider(mHitboxes, "Size", "hitboxes_size", 1.0, 30.0, 0.5)
-pCombat:addSlider(mHitboxes, "Transparency", "hitboxes_transparency", 0.0, 1.0, 0.05)
-pCombat:addColorPicker(mHitboxes, "Color", "hitboxes_color")
+pCombat:addSection(M.Aimbot, "Aim")
+pCombat:addDropdown(M.Aimbot, "Hitbox", "hitbox", {"Head", "Body"})
+pCombat:addDropdown(M.Aimbot, "Priority", "priority", {"Distance", "Health", "Free"})
+pCombat:addDropdown(M.Aimbot, "Activation", "aim_activation", {"RMB", "LMB", "Auto"})
+pCombat:addSlider(M.Aimbot, "FOV", "fov", 10, 500, 1)
+
+pCombat:addSection(M.Aimbot, "Target Filter")
+pCombat:addBoolean(M.Aimbot, "Lock Target", "lock_player")
+pCombat:addBoolean(M.Aimbot, "WallCheck", "wall_check")
+pCombat:addBoolean(M.Aimbot, "Ignore Team", "ignore_team")
+
+pCombat:addSection(M.Aimbot, "Prediction")
+pCombat:addBoolean(M.Aimbot, "Prediction", "prediction_enabled")
+pCombat:addSlider(M.Aimbot, "Predict Amount", "prediction_amount", 0, 0.5, 0.01)
+pCombat:addBoolean(M.Aimbot, "Auto Predict", "auto_predict")
+pCombat:addSlider(M.Aimbot, "Auto Predict Strength", "auto_predict_strength", 0.2, 3, 0.1)
+
+pCombat:addSection(M.Aimbot, "Aim Assist")
+pCombat:addBoolean(M.Aimbot, "Smooth", "smooth_enabled")
+pCombat:addSlider(M.Aimbot, "Smooth Amount", "smooth_amount", 0.01, 1, 0.01)
+pCombat:addBoolean(M.Aimbot, "Noise", "noise_enabled")
+pCombat:addSlider(M.Aimbot, "Noise Amount", "noise_amount", 0, 0.5, 0.01)
+
+pCombat:addSection(M.Aimbot, "Misc")
+pCombat:addBoolean(M.Aimbot, "Speed Display", "speed_display")
+
+M.Hitboxes = pCombat:addModule("Hitboxes", "hitboxes_enabled", true)
+pCombat:addDropdown(M.Hitboxes, "Part", "hitboxes_part", {"Head", "Body"})
+pCombat:addSlider(M.Hitboxes, "Size", "hitboxes_size", 1.0, 30.0, 0.5)
+pCombat:addSlider(M.Hitboxes, "Transparency", "hitboxes_transparency", 0.0, 1.0, 0.05)
+pCombat:addColorPicker(M.Hitboxes, "Color", "hitboxes_color")
 
 table.insert(State.panels, pCombat)
 
 -- 2. VISUALS
 local pVisuals = CategoryPanel.new("Visuals", startX + panelW + gap, 50, panelW)
-local mESP = pVisuals:addModule("Player ESP", "esp_enabled", true)
-pVisuals:addBoolean(mESP, "Self ESP", "esp_self")
-pVisuals:addBoolean(mESP, "Chams", "esp_chams")
-pVisuals:addBoolean(mESP, "Glow Chams", "esp_glow_chams")
-pVisuals:addBoolean(mESP, "Chams Outline", "esp_chams_outline")
-pVisuals:addColorPicker(mESP, "Chams Color", "esp_chams_color")
-pVisuals:addBoolean(mESP, "NameTags", "esp_nametags")
-pVisuals:addBoolean(mESP, "HP Bar", "esp_hp_bar")
-pVisuals:addBoolean(mESP, "Tool", "esp_tool")
-pVisuals:addBoolean(mESP, "Distance", "esp_distance")
-pVisuals:addBoolean(mESP, "Hide Team", "esp_hide_team")
-pVisuals:addBoolean(mESP, "Team Color", "esp_team_color")
-local mTargetESP = pVisuals:addModule("Target ESP", "target_esp", true)
-pVisuals:addDropdown(mTargetESP, "Mode", "target_esp_mode", {"Crosshair", "Circle"})
-pVisuals:addSlider(mTargetESP, "Rotation Speed", "target_esp_rotation_speed", 0, 360, 5)
-pVisuals:addSlider(mTargetESP, "Pulse", "target_esp_pulse", 0, 0.3, 0.01)
-pVisuals:addSlider(mTargetESP, "Pulse Speed", "target_esp_pulse_speed", 0.5, 8, 0.1)
+M.ESP = pVisuals:addModule("Player ESP", "esp_enabled", true)
+pVisuals:addSection(M.ESP, "Chams")
+pVisuals:addBoolean(M.ESP, "Chams", "esp_chams")
+pVisuals:addBoolean(M.ESP, "Glow Chams", "esp_glow_chams")
+pVisuals:addBoolean(M.ESP, "Chams Outline", "esp_chams_outline")
+pVisuals:addColorPicker(M.ESP, "Chams Color", "esp_chams_color")
+
+pVisuals:addSection(M.ESP, "Boxes & Tracers")
+pVisuals:addBoolean(M.ESP, "Box", "esp_box")
+pVisuals:addBoolean(M.ESP, "Tracers", "esp_tracers")
+pVisuals:addDropdown(M.ESP, "Tracer From", "esp_tracer_origin", {"Bottom", "Center", "Mouse"})
+
+pVisuals:addSection(M.ESP, "Labels")
+pVisuals:addBoolean(M.ESP, "NameTags", "esp_nametags")
+pVisuals:addBoolean(M.ESP, "HP Bar", "esp_hp_bar")
+pVisuals:addBoolean(M.ESP, "Tool", "esp_tool")
+pVisuals:addBoolean(M.ESP, "Distance", "esp_distance")
+
+pVisuals:addSection(M.ESP, "Filters")
+pVisuals:addSlider(M.ESP, "Max Distance", "esp_max_distance", 100, 5000, 50)
+pVisuals:addBoolean(M.ESP, "Self ESP", "esp_self")
+pVisuals:addBoolean(M.ESP, "Hide Team", "esp_hide_team")
+pVisuals:addBoolean(M.ESP, "Team Color", "esp_team_color")
+M.TargetESP = pVisuals:addModule("Target ESP", "target_esp", true)
+pVisuals:addDropdown(M.TargetESP, "Mode", "target_esp_mode", {"Crosshair", "Circle"})
+pVisuals:addSlider(M.TargetESP, "Rotation Speed", "target_esp_rotation_speed", 0, 360, 5)
+pVisuals:addSlider(M.TargetESP, "Pulse", "target_esp_pulse", 0, 0.3, 0.01)
+pVisuals:addSlider(M.TargetESP, "Pulse Speed", "target_esp_pulse_speed", 0.5, 8, 0.1)
 pVisuals:addModule("Target HUD", "target_hud", false)
 pVisuals:addModule("Friend Markers", "friend_markers", false)
     local mArrows = pVisuals:addModule("Arrows", "arrows", true)
     pVisuals:addSlider(mArrows, "Radius", "arrows_radius", 20, 250, 1)
     pVisuals:addSlider(mArrows, "Size", "arrows_size", 8, 48, 1)
-local mHUD = pVisuals:addModule("HUD", "hud_enabled", true)
-pVisuals:addBoolean(mHUD, "Watermark", "watermark_enabled")
-pVisuals:addBoolean(mHUD, "Keybind List", "keybind_list_enabled")
-pVisuals:addBoolean(mHUD, "Player Info", "player_info_enabled")
-pVisuals:addColorPicker(mHUD, "Client Color", "client_color")
+M.HUD = pVisuals:addModule("HUD", "hud_enabled", true)
+pVisuals:addSection(M.HUD, "Elements")
+pVisuals:addBoolean(M.HUD, "Watermark", "watermark_enabled")
+pVisuals:addBoolean(M.HUD, "Keybind List", "keybind_list_enabled")
+pVisuals:addBoolean(M.HUD, "Player Info", "player_info_enabled")
+
+pVisuals:addSection(M.HUD, "Style")
+pVisuals:addBoolean(M.HUD, "Accent Stripes", "hud_accents")
+pVisuals:addColorPicker(M.HUD, "Client Color", "client_color")
 pVisuals:addModule("Rainbow FOV", "rainbow_fov", false)
 pVisuals:addModule("Rainbow Crosshair", "rainbow_crosshair", false)
-local mWorldTweaks = pVisuals:addModule("World Tweaks", "world_tweaks_enabled", true)
-pVisuals:addDropdown(mWorldTweaks, "Sky Preset", "world_sky", {"Default", "Day", "Sunset", "Night", "Void", "Candy", "Golden", "Blue", "Apricot", "Golden Hour", "Dream", "Aurora", "Arctic", "Rose", "Storm"})
-pVisuals:addSlider(mWorldTweaks, "Brightness", "world_brightness", 0, 5, 0.1)
-pVisuals:addSlider(mWorldTweaks, "Clock Time", "world_clock_time", 0, 24, 0.5)
-pVisuals:addSlider(mWorldTweaks, "Fog End", "world_fog_end", 200, 100000, 100)
-pVisuals:addBoolean(mWorldTweaks, "Shadows", "world_shadows_enabled")
-pVisuals:addColorPicker(mWorldTweaks, "Fog Color", "world_fog_color")
-pVisuals:addColorPicker(mWorldTweaks, "Ambient", "world_ambient")
-pVisuals:addColorPicker(mWorldTweaks, "Outdoor Ambient", "world_outdoor_ambient")
-pVisuals:addColorPicker(mWorldTweaks, "Shift Top", "world_color_shift_top")
-pVisuals:addColorPicker(mWorldTweaks, "Shift Bottom", "world_color_shift_bottom")
-pVisuals:addBoolean(mWorldTweaks, "Bloom", "world_bloom_enabled")
-pVisuals:addSlider(mWorldTweaks, "Bloom Intensity", "world_bloom_intensity", 0, 5, 0.1)
-pVisuals:addBoolean(mWorldTweaks, "Sun Rays", "world_sunrays_enabled")
-pVisuals:addSlider(mWorldTweaks, "Sun Rays Intensity", "world_sunrays_intensity", 0, 1, 0.05)
-pVisuals:addBoolean(mWorldTweaks, "Color Correction", "world_color_correction_enabled")
-pVisuals:addSlider(mWorldTweaks, "Saturation", "world_saturation", -1, 1, 0.05)
-pVisuals:addSlider(mWorldTweaks, "Contrast", "world_contrast", -1, 1, 0.05)
-pVisuals:addColorPicker(mWorldTweaks, "Tint Color", "world_tint_color")
-local mViewmodel = pVisuals:addModule("Viewmodel", "viewmodel_enabled", true)
-pVisuals:addDropdown(mViewmodel, "Material", "viewmodel_material", {"Neon", "ForceField", "Glass", "SmoothPlastic", "Plastic", "Default"})
-pVisuals:addColorPicker(mViewmodel, "Color", "viewmodel_color")
-local mJumpCircle = pVisuals:addModule("Jump Circle", "jump_circle_enabled", true)
-pVisuals:addSlider(mJumpCircle, "Speed", "jump_circle_speed", 0.1, 2.0, 0.1)
-pVisuals:addSlider(mJumpCircle, "Size", "jump_circle_size", 0.5, 20.0, 0.1)
-pVisuals:addColorPicker(mJumpCircle, "Color", "jump_circle_color")
-local mClickGui = pVisuals:addModule("ClickGui", "clickgui_enabled", true)
-pVisuals:addDropdown(mClickGui, "Animation", "clickgui_animation", {"First", "Two"})
-pVisuals:addBoolean(mClickGui, "Blur", "clickgui_blur")
-pVisuals:addBoolean(mClickGui, "Darken", "clickgui_darken")
-pVisuals:addBoolean(mClickGui, "Image", "clickgui_image")
-pVisuals:addDropdown(mClickGui, "Image Mode", "clickgui_image_mode", {"Vanilla", "Azuki", "mgebrat", "larp", "larp2", "trollface", "Rena", "renagif", "kurumigif"})
-pVisuals:addBoolean(mClickGui, "Animate Trollface", "trollface_animate")
-pVisuals:addBoolean(mClickGui, "Trollface Music", "trollface_music")
-pVisuals:addSlider(mClickGui, "Music Volume", "trollface_volume", 0, 1, 0.1)
-local mCosmetic = pVisuals:addModule("Cosmetic", "cosmetic_enabled", true)
-pVisuals:addBoolean(mCosmetic, "China Hat", "china_hat")
-pVisuals:addBoolean(mCosmetic, "Hide in First Person", "hide_in_first_person")
-pVisuals:addBoolean(mCosmetic, "Friends", "china_hat_friends")
-pVisuals:addBoolean(mCosmetic, "Trails", "trails_enabled")
-pVisuals:addColorPicker(mCosmetic, "Trails Color", "trails_color")
-pVisuals:addSlider(mCosmetic, "Trails Lifetime", "trails_lifetime", 0.5, 5, 0.5)
+M.WorldTweaks = pVisuals:addModule("World Tweaks", "world_tweaks_enabled", true)
+pVisuals:addDropdown(M.WorldTweaks, "Sky Preset", "world_sky", {"Default", "Day", "Sunset", "Night", "Void", "Candy", "Golden", "Blue", "Apricot", "Golden Hour", "Dream", "Aurora", "Arctic", "Rose", "Storm"})
+pVisuals:addSection(M.WorldTweaks, "Lighting")
+pVisuals:addSlider(M.WorldTweaks, "Brightness", "world_brightness", 0, 5, 0.1)
+pVisuals:addSlider(M.WorldTweaks, "Clock Time", "world_clock_time", 0, 24, 0.5)
+pVisuals:addBoolean(M.WorldTweaks, "Shadows", "world_shadows_enabled")
+pVisuals:addColorPicker(M.WorldTweaks, "Ambient", "world_ambient")
+pVisuals:addColorPicker(M.WorldTweaks, "Outdoor Ambient", "world_outdoor_ambient")
+pVisuals:addColorPicker(M.WorldTweaks, "Shift Top", "world_color_shift_top")
+pVisuals:addColorPicker(M.WorldTweaks, "Shift Bottom", "world_color_shift_bottom")
+
+pVisuals:addSection(M.WorldTweaks, "Fog")
+pVisuals:addSlider(M.WorldTweaks, "Fog End", "world_fog_end", 200, 100000, 100)
+pVisuals:addColorPicker(M.WorldTweaks, "Fog Color", "world_fog_color")
+
+pVisuals:addSection(M.WorldTweaks, "Effects")
+pVisuals:addBoolean(M.WorldTweaks, "Bloom", "world_bloom_enabled")
+pVisuals:addSlider(M.WorldTweaks, "Bloom Intensity", "world_bloom_intensity", 0, 5, 0.1)
+pVisuals:addBoolean(M.WorldTweaks, "Sun Rays", "world_sunrays_enabled")
+pVisuals:addSlider(M.WorldTweaks, "Sun Rays Intensity", "world_sunrays_intensity", 0, 1, 0.05)
+pVisuals:addBoolean(M.WorldTweaks, "Color Correction", "world_color_correction_enabled")
+pVisuals:addSlider(M.WorldTweaks, "Saturation", "world_saturation", -1, 1, 0.05)
+pVisuals:addSlider(M.WorldTweaks, "Contrast", "world_contrast", -1, 1, 0.05)
+pVisuals:addColorPicker(M.WorldTweaks, "Tint Color", "world_tint_color")
+M.Viewmodel = pVisuals:addModule("Viewmodel", "viewmodel_enabled", true)
+pVisuals:addDropdown(M.Viewmodel, "Material", "viewmodel_material", {"Neon", "ForceField", "Glass", "SmoothPlastic", "Plastic", "Default"})
+pVisuals:addColorPicker(M.Viewmodel, "Color", "viewmodel_color")
+M.JumpCircle = pVisuals:addModule("Jump Circle", "jump_circle_enabled", true)
+pVisuals:addSlider(M.JumpCircle, "Speed", "jump_circle_speed", 0.1, 2.0, 0.1)
+pVisuals:addSlider(M.JumpCircle, "Size", "jump_circle_size", 0.5, 20.0, 0.1)
+pVisuals:addColorPicker(M.JumpCircle, "Color", "jump_circle_color")
+M.ClickGui = pVisuals:addModule("ClickGui", "clickgui_enabled", true)
+pVisuals:addSection(M.ClickGui, "Animation")
+pVisuals:addDropdown(M.ClickGui, "Animation", "clickgui_animation", {"First", "Two"})
+
+pVisuals:addSection(M.ClickGui, "Hover")
+pVisuals:addBoolean(M.ClickGui, "Hover Outline", "clickgui_hover_outline")
+pVisuals:addBoolean(M.ClickGui, "Module Glow", "clickgui_module_glow")
+pVisuals:addSlider(M.ClickGui, "Glow Strength", "clickgui_module_glow_strength", 0.05, 0.6, 0.05)
+pVisuals:addSlider(M.ClickGui, "Glow Speed", "clickgui_module_glow_speed", 0, 3, 0.1)
+
+pVisuals:addSection(M.ClickGui, "Background")
+pVisuals:addBoolean(M.ClickGui, "Blur", "clickgui_blur")
+pVisuals:addBoolean(M.ClickGui, "Darken", "clickgui_darken")
+
+pVisuals:addSection(M.ClickGui, "Image")
+pVisuals:addBoolean(M.ClickGui, "Image", "clickgui_image")
+pVisuals:addDropdown(M.ClickGui, "Image Mode", "clickgui_image_mode", {"Vanilla", "Azuki", "mgebrat", "larp", "larp2", "trollface", "Rena", "renagif", "kurumigif"})
+pVisuals:addBoolean(M.ClickGui, "Animate Trollface", "trollface_animate")
+pVisuals:addBoolean(M.ClickGui, "Trollface Music", "trollface_music")
+pVisuals:addSlider(M.ClickGui, "Music Volume", "trollface_volume", 0, 1, 0.1)
+M.MouseGlow = pVisuals:addModule("Mouse Glow", "mouse_glow", true)
+pVisuals:addSection(M.MouseGlow, "Appearance")
+pVisuals:addDropdown(M.MouseGlow, "Style", "mouse_glow_style", {"Liquid Glass", "Neon"})
+pVisuals:addSlider(M.MouseGlow, "Size", "mouse_glow_size", 12, 120, 2)
+pVisuals:addSlider(M.MouseGlow, "Dot Size", "mouse_glow_dot", 0, 16, 1)
+pVisuals:addSlider(M.MouseGlow, "Direction Stretch", "mouse_glow_stretch", 0, 2, 0.1)
+
+pVisuals:addSection(M.MouseGlow, "Behavior")
+pVisuals:addBoolean(M.MouseGlow, "Only On Hover", "mouse_glow_on_hover")
+pVisuals:addBoolean(M.MouseGlow, "Always Visible", "mouse_glow_always")
+pVisuals:addBoolean(M.MouseGlow, "Rainbow", "mouse_glow_rainbow")
+M.Arraylist = pVisuals:addModule("Arraylist", "hud_arraylist", true)
+pVisuals:addDropdown(M.Arraylist, "Sort", "hud_arraylist_sort", {"Long", "Short", "Name"})
+pVisuals:addBoolean(M.Arraylist, "Gradient", "hud_arraylist_gradient")
+pVisuals:addBoolean(M.Arraylist, "Colored Text", "hud_arraylist_colored_text")
+M.Cosmetic = pVisuals:addModule("Cosmetic", "cosmetic_enabled", true)
+pVisuals:addSection(M.Cosmetic, "China Hat")
+pVisuals:addBoolean(M.Cosmetic, "China Hat", "china_hat")
+pVisuals:addBoolean(M.Cosmetic, "Hide in First Person", "hide_in_first_person")
+pVisuals:addBoolean(M.Cosmetic, "Friends", "china_hat_friends")
+
+pVisuals:addSection(M.Cosmetic, "Trails")
+pVisuals:addBoolean(M.Cosmetic, "Trails", "trails_enabled")
+pVisuals:addColorPicker(M.Cosmetic, "Trails Color", "trails_color")
+pVisuals:addSlider(M.Cosmetic, "Trails Lifetime", "trails_lifetime", 0.5, 5, 0.5)
 table.insert(State.panels, pVisuals)
 
 -- 3. MOVEMENT
 local pMove = CategoryPanel.new("Movement", startX + (panelW + gap)*2, 50, panelW)
-local mTPWalk = pMove:addModule("TP Walk", "tp_walk_enabled", true)
-pMove:addSlider(mTPWalk, "Speed", "tp_walk_speed", 1, 10, 0.5)
-local mTargetStrafe = pMove:addModule("Target Strafe", "target_strafe_enabled", true)
-pMove:addModuleTextBox(mTargetStrafe, "Target", "target_strafe_target", "Name / DisplayName / partial")
-pMove:addSlider(mTargetStrafe, "Radius", "target_strafe_radius", 2, 20, 0.5)
-pMove:addSlider(mTargetStrafe, "Speed", "target_strafe_speed", 0.5, 8, 0.1)
-pMove:addBoolean(mTargetStrafe, "AutoPredict", "target_strafe_autopredict")
-pMove:addSlider(mTargetStrafe, "Prediction Strength", "target_strafe_prediction_strength", 0.5, 3.0, 0.1)
-pMove:addBoolean(mTargetStrafe, "PredictedPos", "target_strafe_predicted_pos")
-local mInfJump = pMove:addModule("Infinite Jump", "infinite_jump_enabled", true)
-pMove:addDropdown(mInfJump, "Mode", "infinite_jump_mode", {"Default", "Platform"})
-pMove:addSlider(mInfJump, "Jump Power", "infinite_jump_power", 10, 100, 1)
-pMove:addBoolean(mInfJump, "Bypass AntiCheat", "infinite_jump_bypass")
-pMove:addSlider(mInfJump, "Fall Speed Limit", "infinite_jump_fall_limit", 40, 120, 1)
-local mSpider = pMove:addModule("Spider", "spider_enabled", true)
-pMove:addDropdown(mSpider, "Mode", "spider_mode", {"Default", "Platform"})
-pMove:addBoolean(mSpider, "Bypass", "spider_bypass")
-pMove:addSlider(mSpider, "Fall Speed Limit", "spider_fall_limit", 40, 120, 1)
-local mAirStuck = pMove:addModule("Air Stuck", "air_stuck_enabled", false)
-local mSmoothFall = pMove:addModule("Smooth Fall", "smooth_fall_enabled", false)
-pMove:addSlider(mSmoothFall, "Fall Speed", "smooth_fall_speed", 10, 80, 1)
-pMove:addSlider(mSmoothFall, "Smoothness", "smooth_fall_smoothness", 0.1, 1.0, 0.05)
-local mSpeed = pMove:addModule("Speed", "speed_enabled", true)
-pMove:addSlider(mSpeed, "Speed", "speed_speed", 16, 60, 1)
-pMove:addBoolean(mSpeed, "Bypass", "speed_bypass")
-pMove:addSlider(mSpeed, "Jump Interval", "speed_jump_interval", 0.1, 1.0, 0.05)
+M.TPWalk = pMove:addModule("TP Walk", "tp_walk_enabled", true)
+pMove:addSlider(M.TPWalk, "Speed", "tp_walk_speed", 1, 10, 0.5)
+M.TargetStrafe = pMove:addModule("Target Strafe", "target_strafe_enabled", true)
+pMove:addSection(M.TargetStrafe, "Target")
+pMove:addModuleTextBox(M.TargetStrafe, "Target", "target_strafe_target", "Name / DisplayName / partial")
+
+pMove:addSection(M.TargetStrafe, "Orbit")
+pMove:addSlider(M.TargetStrafe, "Radius", "target_strafe_radius", 2, 20, 0.5)
+pMove:addSlider(M.TargetStrafe, "Speed", "target_strafe_speed", 0.5, 8, 0.1)
+
+pMove:addSection(M.TargetStrafe, "Prediction")
+pMove:addBoolean(M.TargetStrafe, "AutoPredict", "target_strafe_autopredict")
+pMove:addSlider(M.TargetStrafe, "Prediction Strength", "target_strafe_prediction_strength", 0.5, 3.0, 0.1)
+pMove:addBoolean(M.TargetStrafe, "PredictedPos", "target_strafe_predicted_pos")
+M.InfJump = pMove:addModule("Infinite Jump", "infinite_jump_enabled", true)
+pMove:addSection(M.InfJump, "Jump")
+pMove:addDropdown(M.InfJump, "Mode", "infinite_jump_mode", {"Default", "Platform"})
+pMove:addSlider(M.InfJump, "Jump Power", "infinite_jump_power", 10, 100, 1)
+
+pMove:addSection(M.InfJump, "Bypass")
+pMove:addBoolean(M.InfJump, "Bypass AntiCheat", "infinite_jump_bypass")
+pMove:addSlider(M.InfJump, "Fall Speed Limit", "infinite_jump_fall_limit", 40, 120, 1)
+M.Spider = pMove:addModule("Spider", "spider_enabled", true)
+pMove:addDropdown(M.Spider, "Mode", "spider_mode", {"Default", "Platform"})
+pMove:addBoolean(M.Spider, "Bypass", "spider_bypass")
+pMove:addSlider(M.Spider, "Fall Speed Limit", "spider_fall_limit", 40, 120, 1)
+M.AirStuck = pMove:addModule("Air Stuck", "air_stuck_enabled", false)
+M.SmoothFall = pMove:addModule("Smooth Fall", "smooth_fall_enabled", false)
+pMove:addSlider(M.SmoothFall, "Fall Speed", "smooth_fall_speed", 10, 80, 1)
+pMove:addSlider(M.SmoothFall, "Smoothness", "smooth_fall_smoothness", 0.1, 1.0, 0.05)
+M.Speed = pMove:addModule("Speed", "speed_enabled", true)
+pMove:addSlider(M.Speed, "Speed", "speed_speed", 16, 60, 1)
+pMove:addBoolean(M.Speed, "Bypass", "speed_bypass")
+pMove:addSlider(M.Speed, "Jump Interval", "speed_jump_interval", 0.1, 1.0, 0.05)
 pMove:addModule("Safe Walk", "safe_walk_enabled", false)
-local mFly = pMove:addModule("Fly", "fly_enabled", true)
-pMove:addDropdown(mFly, "Mode", "fly_mode", {"Gyro", "CFrame", "Platform", "Velocity", "Tween", "Climb", "Seat", "Test", "Lags", "Legit"})
-pMove:addSlider(mFly, "Speed", "fly_speed", 0.1, 5, 0.1)
-pMove:addBoolean(mFly, "Bypass AntiCheat", "fly_bypass")
-pMove:addDropdown(mFly, "Bypass Mode", "fly_bypass_mode", {"Velocity", "Teleport", "Hybrid", "Jitter", "Smooth"})
-local mClumsy = pMove:addModule("Clumsy", "clumsy_enabled", true)
-pMove:addSlider(mClumsy, "Speed", "clumsy_speed", 10, 100, 1)
-pMove:addBoolean(mClumsy, "Visualize", "clumsy_visualize")
+pMove:addModule("Noclip", "noclip_enabled", false)
+M.Fly = pMove:addModule("Fly", "fly_enabled", true)
+pMove:addSection(M.Fly, "Flight")
+pMove:addDropdown(M.Fly, "Mode", "fly_mode", {"Gyro", "CFrame", "Platform", "Velocity", "Tween", "Climb", "Seat", "Test", "Lags", "Legit"})
+pMove:addSlider(M.Fly, "Speed", "fly_speed", 0.1, 5, 0.1)
+
+pMove:addSection(M.Fly, "Bypass")
+pMove:addBoolean(M.Fly, "Bypass AntiCheat", "fly_bypass")
+pMove:addDropdown(M.Fly, "Bypass Mode", "fly_bypass_mode", {"Velocity", "Teleport", "Hybrid", "Jitter", "Smooth"})
+M.Clumsy = pMove:addModule("Clumsy", "clumsy_enabled", true)
+pMove:addSlider(M.Clumsy, "Speed", "clumsy_speed", 10, 100, 1)
+pMove:addBoolean(M.Clumsy, "Visualize", "clumsy_visualize")
 table.insert(State.panels, pMove)
 
 -- 4. MISC
 local pMisc = CategoryPanel.new("Misc", startX + (panelW + gap)*3, 50, panelW)
-local mFreecam = pMisc:addModule("Freecam", "freecam_enabled", true)
-pMisc:addSlider(mFreecam, "Speed", "freecam_speed", 0.1, 5, 0.1)
-local mClickAction = pMisc:addModule("Friend Add/Rem", "click_action", false)
+M.Freecam = pMisc:addModule("Freecam", "freecam_enabled", true)
+pMisc:addSlider(M.Freecam, "Speed", "freecam_speed", 0.1, 5, 0.1)
+M.ClickAction = pMisc:addModule("Friend Add/Rem", "click_action", false)
 pMisc:addModule("AntiFling", "anti_fling", false)
+pMisc:addModule("Anti-AFK", "anti_afk", false)
+pMisc:addModule("Friends List", "friends_window", false)
+M.Notify = pMisc:addModule("Notifications", "notifications_enabled", true)
+pMisc:addSlider(M.Notify, "Duration", "notification_time", 1, 10, 0.5)
+pMisc:addSlider(M.Notify, "Speed", "notification_speed", 0.05, 0.6, 0.01)
+pMisc:addBoolean(M.Notify, "Module Toggles", "notification_modules")
 pMisc:addModule("FullBright", "fullbright", false)
 pMisc:addModule("Always Day", "always_day", false)
 pMisc:addModule("Chat", "chat_enabled", false)
-local mUnload = pMisc:addModule("Unload Script", "unload_script", false)
+M.Unload = pMisc:addModule("Unload Script", "unload_script", false)
 table.insert(State.panels, pMisc)
 
 -- 5. CONFIG
@@ -5058,6 +6610,7 @@ saveConfig = function(name)
     end
     
     local encodedName = encodeConfigName(name)
+    EXT.captureAllPositions()
     local runtimeData, serializedData = snapshotConfigData()
     local timestamp = os.time()
     local filePath = getConfigFilePath(encodedName)
@@ -5143,6 +6696,7 @@ loadConfig = function(encodedName)
     getgenv().aim_settings.config_name = config.name
     refreshUIFromSettings()
     updateAllColors()
+    EXT.applySavedPositions()
     
     return true, "Конфиг '" .. config.name .. "' загружен"
 end
@@ -5193,7 +6747,7 @@ pConfig:addButton("Save Config", function()
     name = name:gsub("^%s*(.-)%s*$", "%1") -- Убираем пробелы
     
     local success, message = saveConfig(name)
-    print(message)
+    EXT.notify(message, success and "ok" or "error")
     
     if success then
         getgenv().aim_settings.config_name = "" -- Очищаем поле
@@ -5206,16 +6760,16 @@ end)
 pConfig:addButton("Load Selected", function()
     if selectedConfig ~= "" then
         local success, message = loadConfig(selectedConfig)
-        print(message)
+        EXT.notify(message, success and "ok" or "error")
     else
-        print("Выберите конфиг для загрузки")
+        EXT.notify("Выберите конфиг для загрузки", "error")
     end
 end)
 
 pConfig:addButton("Delete Selected", function()
     if selectedConfig ~= "" then
         local success, message = deleteConfig(selectedConfig)
-        print(message)
+        EXT.notify(message, success and "ok" or "error")
         if success then
             selectedConfig = ""
             getgenv().aim_settings.config_name = "" -- Очищаем поле
@@ -5223,7 +6777,7 @@ pConfig:addButton("Delete Selected", function()
             updateConfigList() -- Обновляем список после удаления
         end
     else
-        print("Выберите конфиг для удаления")
+        EXT.notify("Выберите конфиг для удаления", "error")
     end
 end)
 
@@ -5327,6 +6881,10 @@ pConfig:addButton("Refresh List", function()
     updateConfigList()
 end)
 
+pConfig:addButton("Reset HUD Layout", function()
+    EXT.resetHudLayout()
+end)
+
 table.insert(State.panels, pConfig)
 
 -- Создаем тестовые конфиги
@@ -5335,6 +6893,14 @@ task.spawn(function()
     task.wait(1.2)
     reloadConfigsFromDisk()
     updateConfigList()
+
+    -- Автозагрузка конфига с именем "default", если он есть
+    local defaultEncoded = encodeConfigName("default")
+    if configList[defaultEncoded] then
+        local ok, message = loadConfig(defaultEncoded)
+        EXT.notify(ok and "Автозагрузка: default" or message, ok and "ok" or "error")
+        updateConfigList()
+    end
 end)
 end
 
@@ -5846,6 +7412,14 @@ State.connections.mainLoop = G.RS.RenderStepped:Connect(function()
     end
     
     updateTPWalk()
+    EXT.updateNoclip()
+    EXT.updateEspDrawings()
+    EXT.updateFriendsWindow()
+    EXT.updateArraylist()
+    EXT.updateHudStyle()
+    EXT.updateNotifications()
+    EXT.updateModuleGlow(dt)
+    EXT.updateMouseGlow(dt)
     
     local s = getgenv().aim_settings
     local currentPlayers = G.Plr:GetPlayers()
@@ -6598,7 +8172,8 @@ State.connections.mainLoop = G.RS.RenderStepped:Connect(function()
         -- и заново создавал все GUI-элементы каждый кадр.
         local signature = ""
         for _, e in ipairs(bindEntries) do
-            signature = signature .. e.name .. "|" .. tostring(e.keyCode) .. "|" .. tostring(e.active) .. ";"
+            signature = signature .. e.name .. "|" .. tostring(e.keyCode)
+                .. "|" .. tostring(e.active) .. "|" .. tostring(e.hold) .. ";"
         end
 
         if signature ~= State.keybindSignature then
@@ -6636,7 +8211,7 @@ State.connections.mainLoop = G.RS.RenderStepped:Connect(function()
                 keyLbl.Size = UDim2.new(0.4, 0, 1, 0)
                 keyLbl.Position = UDim2.new(0.6, 0, 0, 0)
                 keyLbl.BackgroundTransparency = 1
-                keyLbl.Text = "[" .. getKeyName(keyCode) .. "]"
+                keyLbl.Text = "[" .. getKeyName(keyCode) .. (bindEntry.hold and " hold" or "") .. "]"
                 keyLbl.TextColor3 = getClientColor()
                 keyLbl.Font = Enum.Font.GothamBold
                 keyLbl.TextSize = 11
@@ -6811,6 +8386,10 @@ State.connections.mainLoop = G.RS.RenderStepped:Connect(function()
         -- Обновляем текст с анимированными значениями
         FPSLabel.Text = State.watermark.displayFPS .. "fps"
         PingLabel.Text = State.watermark.displayPing .. "ms"
+        -- Метрики подсвечиваются: зелёный хорошо, жёлтый средне, красный плохо
+        FPSLabel.TextColor3 = EXT.metricColor(-State.watermark.displayFPS, -100, -30)
+        PingLabel.TextColor3 = EXT.metricColor(State.watermark.displayPing, 80, 200)
+        NickLabel.Text = G.LP.Name .. " · " .. EXT.formatSession()
         
         -- Вращающийся градиент
         local rotationSpeed = 30
@@ -6851,7 +8430,7 @@ State.connections.mainLoop = G.RS.RenderStepped:Connect(function()
                     local rayDirection = Vector3.new(0, -100, 0) -- Луч вниз на 100 стадов
                     
                     local raycastParams = RaycastParams.new()
-                    raycastParams.FilterType = RAYCAST_EXCLUDE
+                    raycastParams.FilterType = G.RayExclude
                     raycastParams.FilterDescendantsInstances = {player.Character} -- Исключаем самого игрока
                     
                     local raycastResult = workspace:Raycast(rayOrigin, rayDirection, raycastParams)
@@ -7588,31 +9167,40 @@ State.connections.mainLoop = G.RS.RenderStepped:Connect(function()
         local humanoid = character:FindFirstChildOfClass("Humanoid")
         
         if targetPlayer and humanoid and humanoid.Health > 0 then
-            -- Обновляем аватар
-            local userId = targetPlayer.UserId
-            AvatarImage.Image = getHeadshotImage(userId)
-            
-            -- Обновляем имя
+            -- Аватар запрашивается по сети, поэтому только при смене цели.
+            -- Раньше вызов шёл каждый кадр и подвешивал обновление HUD.
+            if State.targetHud.userId ~= targetPlayer.UserId then
+                State.targetHud.userId = targetPlayer.UserId
+                AvatarImage.Image = getHeadshotImage(targetPlayer.UserId)
+            end
+
             TargetNameLabel.Text = targetPlayer.Name
-            
-            -- Обновляем HP
-            local hum = State.LockedTarget.Parent:FindFirstChildOfClass("Humanoid")
-            if hum then
-                local health = math.floor(hum.Health)
-                local maxHealth = math.floor(hum.MaxHealth)
-                local velocity = State.LockedTarget.Velocity
-                local horizontalVelocity = Vector3.new(velocity.X, 0, velocity.Z)
-                local speed = math.floor(horizontalVelocity.Magnitude * 10) / 10
-                TargetHPLabel.Text = "HP: " .. health
-                TargetSpeedInfoLabel.Text = speed .. " studs/s"
-                
-                -- Анимация HP бара
-                local healthPercent = math.clamp(health / maxHealth, 0, 1)
-                tw(HPBarFill, {Size = UDim2.new(healthPercent, 0, 1, 0)}, 0.2)
-                
-                TargetMetaLabel.Text = ""
-                
-                -- Используем цвета клиента для градиента (слева темнее, справа светлее)
+
+            -- MaxHealth может быть нулевым - тогда деление давало nan
+            local maxHealth = math.max(humanoid.MaxHealth, 1)
+            local health = math.clamp(humanoid.Health, 0, maxHealth)
+            local ratio = health / maxHealth
+
+            TargetHPLabel.Text = string.format("HP: %d / %d",
+                math.floor(health + 0.5), math.floor(maxHealth + 0.5))
+
+            local velocity = State.LockedTarget.Velocity
+            local speed = Vector3.new(velocity.X, 0, velocity.Z).Magnitude
+            TargetSpeedInfoLabel.Text = string.format("%.1f studs/s", speed)
+
+            -- Полоса двигается интерполяцией по dt. Прежний код запускал
+            -- новый твин на 0.2 с каждый кадр: тот не успевал доиграть и
+            -- перезапускался, поэтому шкала почти не двигалась.
+            State.targetHud.ratio = State.targetHud.ratio
+                + (ratio - State.targetHud.ratio) * math.clamp(dt * 12, 0, 1)
+            HPBarFill.Size = UDim2.new(State.targetHud.ratio, 0, 1, 0)
+
+            TargetMetaLabel.Text = ""
+
+            -- Градиент пересобираем только при смене цвета клиента
+            local clientColor = getClientColor()
+            if State.targetHud.color ~= clientColor then
+                State.targetHud.color = clientColor
                 updateHPBarGradient()
             end
         else
@@ -7620,7 +9208,10 @@ State.connections.mainLoop = G.RS.RenderStepped:Connect(function()
         end
     elseif getgenv().aim_settings.target_hud and guiVisible then
         -- Показываем пример когда меню открыто
-        AvatarImage.Image = getHeadshotImage(G.LP.UserId)
+        if State.targetHud.userId ~= G.LP.UserId then
+            State.targetHud.userId = G.LP.UserId
+            AvatarImage.Image = getHeadshotImage(G.LP.UserId)
+        end
         TargetNameLabel.Text = G.LP.Name
         TargetMetaLabel.Text = ""
         local previewHumanoid = G.LP.Character and G.LP.Character:FindFirstChildOfClass("Humanoid")
@@ -7630,12 +9221,17 @@ State.connections.mainLoop = G.RS.RenderStepped:Connect(function()
         local previewVelocity = previewRoot and previewRoot.Velocity or Vector3.new(0, 0, 0)
         local previewHorizontalVelocity = Vector3.new(previewVelocity.X, 0, previewVelocity.Z)
         local previewSpeed = math.floor(previewHorizontalVelocity.Magnitude * 10) / 10
-        TargetHPLabel.Text = "HP: " .. previewHealth
-        TargetSpeedInfoLabel.Text = previewSpeed .. " studs/s"
-        HPBarFill.Size = UDim2.new(math.clamp(previewHealth / previewMaxHealth, 0, 1), 0, 1, 0)
-        
-        -- Используем цвета клиента для градиента
-        updateHPBarGradient()
+        TargetHPLabel.Text = string.format("HP: %d / %d",
+            previewHealth, math.floor(previewMaxHealth + 0.5))
+        TargetSpeedInfoLabel.Text = string.format("%.1f studs/s", previewSpeed)
+        State.targetHud.ratio = math.clamp(previewHealth / previewMaxHealth, 0, 1)
+        HPBarFill.Size = UDim2.new(State.targetHud.ratio, 0, 1, 0)
+
+        local previewColor = getClientColor()
+        if State.targetHud.color ~= previewColor then
+            State.targetHud.color = previewColor
+            updateHPBarGradient()
+        end
     end
     
     -- Aimbot G.Cam is updated in BindToRenderStep so fast mode can override recoil/shake.
@@ -7676,6 +9272,12 @@ State.connections.mainLoop = G.RS.RenderStepped:Connect(function()
         getgenv().aim_settings.hud_enabled = false
         getgenv().aim_settings.watermark_enabled = false
         getgenv().aim_settings.keybind_list_enabled = false
+        getgenv().aim_settings.hud_arraylist = false
+        getgenv().aim_settings.esp_box = false
+        getgenv().aim_settings.esp_tracers = false
+        getgenv().aim_settings.noclip_enabled = false
+        getgenv().aim_settings.anti_afk = false
+        getgenv().aim_settings.friends_window = false
         getgenv().aim_settings.running = false
         
         -- Очищаем все hotkeys
@@ -7713,6 +9315,18 @@ State.connections.mainLoop = G.RS.RenderStepped:Connect(function()
             end
         end
         pcall(function() clearTargetStrafeVisuals() end)
+        pcall(function() EXT.clearAllEspDrawings() end)
+        pcall(function() EXT.updateNoclip() end)
+        pcall(function() EXT.FriendsWindow:Destroy() end)
+        pcall(function() EXT.SearchBar:Destroy() end)
+        pcall(function() EXT.NotifyHolder:Destroy() end)
+        pcall(function() EXT.Arraylist:Destroy() end)
+        pcall(function() EXT.clearNotifications() end)
+        pcall(function() EXT.GlowGui:Destroy() end)
+        if State.antiAfkConnection then
+            pcall(function() State.antiAfkConnection:Disconnect() end)
+            State.antiAfkConnection = nil
+        end
         
         -- Отключаем все connections
         for name, connection in pairs(State.connections) do
@@ -7923,10 +9537,19 @@ G.RS:BindToRenderStep("Y_AimbotCamera", Enum.RenderPriority.Last.Value + 1, upda
 -- [[ GLOBAL MOUSE RELEASE ]]
 State.connections.inputEnded = G.UIS.InputEnded:Connect(function(input)
     if input.UserInputType == Enum.UserInputType.MouseButton1 then
+        local wasDragging = targetHudDragging
         for _, panel in ipairs(State.panels) do
+            if panel.dragging then wasDragging = true end
             panel.dragging = false
         end
+        if targetHudDragging then
+            EXT.saveUiPosition("target_hud", TargetHudFrame.Position)
+        end
         targetHudDragging = false
+        -- Позиции запоминаются только после реального перетаскивания
+        if wasDragging then
+            EXT.savePanelPositions()
+        end
     end
 end)
 
@@ -7975,7 +9598,8 @@ State.connections.inputBegan = G.UIS.InputBegan:Connect(function(input, gp)
         local targetPlayer = getPlayerFromMouse()
         if targetPlayer then
             local added, message = toggleFriend(targetPlayer.Name)
-            print(targetPlayer.Name .. " - " .. message)
+            EXT.notify(targetPlayer.Name .. " - " .. message, added and "ok" or "error")
+            EXT.refreshFriendsWindow()
         end
     end
     
@@ -7991,10 +9615,22 @@ State.connections.inputBegan = G.UIS.InputBegan:Connect(function(input, gp)
         return
     end
     
+    -- Паника: мгновенно выключить всё
+    if input.KeyCode == getgenv().aim_settings.panic_key
+        and getgenv().aim_settings.panic_key ~= Enum.KeyCode.Unknown then
+        EXT.panic()
+        return
+    end
+    
     -- Toggle Modules via Hotkey
     for settingKey, keyCode in pairs(getgenv().aim_settings.hotkeys) do
         if input.KeyCode == keyCode and keyCode ~= Enum.KeyCode.Unknown then
-            getgenv().aim_settings[settingKey] = not getgenv().aim_settings[settingKey]
+            if getgenv().aim_settings.hotkey_modes[settingKey] == "Hold" then
+                getgenv().aim_settings[settingKey] = true
+            else
+                getgenv().aim_settings[settingKey] = not getgenv().aim_settings[settingKey]
+            end
+            EXT.notifyToggle(settingKey, getgenv().aim_settings[settingKey])
             
             -- Обновляем визуально все кнопки с этим settingKey
             for _, p in ipairs(State.panels) do
@@ -8011,6 +9647,22 @@ end)
 
 G.UIS.InputEnded:Connect(function(input, gp)
     if gp then return end
+
+    -- Бинды в режиме Hold работают только пока клавиша зажата
+    for settingKey, keyCode in pairs(getgenv().aim_settings.hotkeys) do
+        if input.KeyCode == keyCode and keyCode ~= Enum.KeyCode.Unknown
+            and getgenv().aim_settings.hotkey_modes[settingKey] == "Hold" then
+            getgenv().aim_settings[settingKey] = false
+            EXT.notifyToggle(settingKey, false)
+            for _, p in ipairs(State.panels) do
+                for _, m in ipairs(p.modules) do
+                    if m.settingKey == settingKey then
+                        tw(m.btn, {BackgroundColor3 = THEME.MODULE_BG}, 0.2)
+                    end
+                end
+            end
+        end
+    end
 end)
 
 -- Fly Functions (using State to avoid local variable limit)
@@ -8474,7 +10126,7 @@ local function Fly_Mode_Test()
             -- Проверяем касание земли
             local rayParams = RaycastParams.new()
             rayParams.FilterDescendantsInstances = {State.fly.ch}
-            rayParams.FilterType = RAYCAST_EXCLUDE
+            rayParams.FilterType = G.RayExclude
             local ray = workspace:Raycast(State.fly.hr.Position, Vector3.new(0, -5, 0), rayParams)
             
             if ray or State.fly.touchCooldown <= 0 then
@@ -8638,7 +10290,7 @@ local function Fly_Mode_Legit()
         -- Проверяем землю
         local rayParams = RaycastParams.new()
         rayParams.FilterDescendantsInstances = {State.fly.ch, State.fly.platform}
-        rayParams.FilterType = RAYCAST_EXCLUDE
+        rayParams.FilterType = G.RayExclude
         
         local rayResult = workspace:Raycast(hrPos, Vector3.new(0, -100, 0), rayParams)
         
@@ -8891,6 +10543,9 @@ task.spawn(function()
         end
     end
 end)
+
+EXT.initAntiAfk()
+EXT.applySavedPositions()
 
 -- Инициализация Infinite Jump
 for _, player in ipairs(G.Plr:GetPlayers()) do
