@@ -95,6 +95,23 @@ getgenv().aim_settings = {
     cosmetic_enabled = false,
     hide_in_first_person = true,
     china_hat_friends = false,
+    china_hat_size = 1,             -- множитель к базовому масштабу меша
+    china_hat_height = 0.9,         -- высота над центром головы
+    china_hat_speed = 45,           -- градусов в секунду
+    china_hat_transparency = 0.4,   -- стеклу нужна прозрачность, иначе оно матовое
+    china_hat_material = "Glass",
+    china_hat_float = 0.35,         -- размах парения вверх-вниз, студы
+    china_hat_float_speed = 1.6,
+    china_hat_rainbow = false,
+    -- Аура: ленты, вьющиеся вокруг игрока
+    aura_enabled = false,
+    aura_count = 4,
+    aura_radius = 4,
+    aura_speed = 2,
+    aura_wave = 2,          -- размах хода по вертикали
+    aura_width = 0.3,       -- ширина ленты
+    aura_trail_life = 0.6,  -- длина хвоста в секундах
+    aura_rainbow = false,
     trails_enabled = false, -- Trails за персонажем
     trails_color = Color3.fromRGB(0, 170, 255),
     trails_lifetime = 2, -- Время жbизни трейла в секундах
@@ -117,6 +134,7 @@ getgenv().aim_settings = {
     esp_max_distance = 1000,
     -- Друзья
     friends_window = false,
+    clickgui_animations = true,    -- всплески, отскоки и въезды элементов
     clickgui_hover_outline = true, -- подсветка обводки при наведении на модуль
     clickgui_module_glow = true,          -- подсветка модуля при наведении
     clickgui_module_glow_strength = 0.25, -- сила подсветки
@@ -145,11 +163,13 @@ getgenv().aim_settings = {
     panic_key = Enum.KeyCode.Delete,
     -- Hitboxes settings
     hitboxes_enabled = false,
-    hitboxes_visualization = false,
-    hitboxes_part = "Head",
+    hitboxes_visualization = true,  -- false = хитбокс растёт, но выглядит как обычно
+    hitboxes_part = "Head",         -- "Head" / "Body" / "Both"
     hitboxes_size = 15.0,
     hitboxes_transparency = 0.7,
     hitboxes_color = Color3.fromRGB(0, 170, 255),
+    hitboxes_ignore_team = false,
+    hitboxes_max_distance = 0,      -- 0 = без ограничения по дистанции
     -- Chat settings
     chat_enabled = false,
     -- Misc settings
@@ -236,7 +256,11 @@ local State = {
     targetEsp = {container = nil, rotation = 0},
     lastAimbotCFrame = nil,
     chinaHat = nil,
+    chinaHatData = nil,   -- полный набор: тело, слои, меши, свет
     chinaHatLayers = {},
+    chinaHatPhase = 0,    -- накопленный угол вращения, градусы
+    chinaHatClock = 0,    -- своё время анимации, секунды
+    auraClock = 0,
     lastCameraMode = nil,
     friendsHats = {},
     viewmodel = {
@@ -279,7 +303,7 @@ local State = {
         fpsAnimProgress = 1,
         pingAnimProgress = 1
     },
-    keybindItems = {},
+    keybindItems = {},   -- name -> строка списка
     keybindSignature = nil,
     draggables = {},      -- ключ -> GuiObject, для сохранения позиций
     notifications = {},   -- активные тосты
@@ -1035,8 +1059,8 @@ local function updateAllColors()
     -- Обновляем последний цвет
     lastClientColor = clientColor
     
-    -- Обновляем цвета хитбоксов (новая система применяет цвет автоматически)
-    -- Цвет будет применен при следующем обновлении updateHitboxes()
+    -- Хитбоксы красить здесь не нужно: EXT.updateHitboxes() берёт цвет
+    -- из настроек каждый кадр и сам подхватит новое значение.
     
     -- Обновляем цвета чата
     if ChatSendBtn then
@@ -1526,7 +1550,18 @@ local keybindStroke = Instance.new("UIStroke", KeybindList)
 keybindStroke.Color = THEME.PANEL_STROKE
 keybindStroke.Thickness = 1.5
 
-local keybindTitle = Instance.new("TextLabel", KeybindList)
+-- Содержимое списка живёт в отдельном слое. UIListLayout расставляет ВСЕХ
+-- детей своего контейнера, поэтому акцентная полоска, повешенная прямо на
+-- карточку, попадала в поток списка: её высота (1, -10) уходила в
+-- AbsoluteContentSize, от которого считается высота панели, и та начинала
+-- раздуваться сама от себя. Полоске нужен уровень выше layout.
+EXT.KeybindContent = Instance.new("Frame", KeybindList)
+EXT.KeybindContent.Name = "Content"
+EXT.KeybindContent.Size = UDim2.new(1, 0, 1, 0)
+EXT.KeybindContent.BackgroundTransparency = 1
+EXT.KeybindContent.ZIndex = 100
+
+local keybindTitle = Instance.new("TextLabel", EXT.KeybindContent)
 keybindTitle.Size = UDim2.new(1, 0, 0, 30)
 keybindTitle.BackgroundTransparency = 1
 keybindTitle.Text = "keybinds"
@@ -1536,13 +1571,13 @@ keybindTitle.TextSize = 14
 keybindTitle.LayoutOrder = 1
 keybindTitle.ZIndex = 101
 
-local keybindLayout = Instance.new("UIListLayout", KeybindList)
+local keybindLayout = Instance.new("UIListLayout", EXT.KeybindContent)
 keybindLayout.SortOrder = Enum.SortOrder.LayoutOrder
 keybindLayout.Padding = UDim.new(0, 4)
 keybindLayout.HorizontalAlignment = Enum.HorizontalAlignment.Center
 
-local keybindSpacer = Instance.new("Frame", KeybindList)
-keybindSpacer.Size = UDim2.new(1, -16, 0, 4)
+local keybindSpacer = Instance.new("Frame", EXT.KeybindContent)
+keybindSpacer.Size = UDim2.new(1, -22, 0, 4)
 keybindSpacer.BackgroundTransparency = 1
 keybindSpacer.LayoutOrder = 2
 keybindSpacer.ZIndex = 100
@@ -1553,6 +1588,32 @@ keybindDivider.Position = UDim2.new(0, 0, 0.5, 0)
 keybindDivider.BackgroundColor3 = Color3.fromRGB(255, 255, 255)
 keybindDivider.BorderSizePixel = 0
 keybindDivider.ZIndex = 101
+
+-- Вертикальный разделитель между названием бинда и его состоянием.
+-- Висит на карточке, а не в Content: внутри UIListLayout он снова стал бы
+-- элементом списка. Позиция и высота посчитаны от шага раскладки:
+-- заголовок 30 + отступ 4 + разделитель 4 + отступ 4 = первая строка на y=42,
+-- дальше строки по 20 с шагом 24, поэтому низ панели отстоит на 52.
+EXT.KeybindSplit = Instance.new("Frame", KeybindList)
+EXT.KeybindSplit.Name = "Split"
+EXT.KeybindSplit.Position = UDim2.new(0, 106, 0, 42)
+EXT.KeybindSplit.Size = UDim2.new(0, 1, 1, -52)
+EXT.KeybindSplit.BackgroundColor3 = getClientColor()
+EXT.KeybindSplit.BorderSizePixel = 0
+EXT.KeybindSplit.Visible = false
+EXT.KeybindSplit.ZIndex = 99
+
+do
+    -- Затухание к торцам, чтобы линия не упиралась в края списка
+    local splitGradient = Instance.new("UIGradient", EXT.KeybindSplit)
+    splitGradient.Rotation = 90
+    splitGradient.Transparency = NumberSequence.new({
+        NumberSequenceKeypoint.new(0.00, 0.85),
+        NumberSequenceKeypoint.new(0.30, 0.35),
+        NumberSequenceKeypoint.new(0.70, 0.35),
+        NumberSequenceKeypoint.new(1.00, 0.85)
+    })
+end
 
 local keybindDividerGradient = Instance.new("UIGradient", keybindDivider)
 keybindDividerGradient.Transparency = NumberSequence.new({
@@ -2053,111 +2114,161 @@ end
 
 -- Флаги для отслеживания состояния (чтобы не применять каждый кадр)
 
+-- Слои шляпы: масштаб, базовая прозрачность, множитель яркости и
+-- относительная скорость вращения. Встречное вращение читается глазом как
+-- объём, одинаковое - как один плоский диск.
+EXT.chinaHatMaterials = {
+    Glass = Enum.Material.Glass,
+    Neon = Enum.Material.Neon,
+    ForceField = Enum.Material.ForceField,
+    Plastic = Enum.Material.SmoothPlastic
+}
+
+EXT.chinaHatLayers = {
+    {scale = 1.92, transparency = 0.45, shade = 0.75, spin = -0.6},
+    {scale = 1.85, transparency = 0.30, shade = 1.00, spin =  1.0},
+    {scale = 1.74, transparency = 0.55, shade = 1.25, spin = -1.5}
+}
+
 -- Функция создания China Hat
 local function createChinaHat(playerName, isLocalPlayer)
     local hatData = {
         hat = nil,
         layers = {},
+        meshes = {},
         playerName = playerName
     }
-    
-    -- Основная часть China Hat
+
+    -- Общие свойства всех деталей шляпы
+    local function styleHatPart(part)
+        part.Size = Vector3.new(3.5, 0.8, 3.5)
+        part.Shape = Enum.PartType.Block
+        part.CanCollide = false
+        part.CanTouch = false
+        -- Без этого шляпа перехватывает лучи: wallcheck аимбота и наведение
+        -- мышью упирались бы в собственную макушку.
+        part.CanQuery = false
+        part.CastShadow = false
+        part.Anchored = true
+        part.Locked = true
+        part.Parent = workspace
+    end
+
     hatData.hat = Instance.new("Part")
     hatData.hat.Name = isLocalPlayer and "State.chinaHat" or ("ChinaHat_" .. playerName)
-    hatData.hat.Size = Vector3.new(3.5, 0.8, 3.5)
-    hatData.hat.Shape = Enum.PartType.Block
-    hatData.hat.Material = Enum.Material.ForceField
+    hatData.hat.Material = EXT.chinaHatMaterials[getgenv().aim_settings.china_hat_material]
+        or Enum.Material.Glass
     hatData.hat.Color = getClientColor()
-    hatData.hat.CanCollide = false
-    hatData.hat.Anchored = true
-    hatData.hat.Parent = workspace
-    hatData.hat.Transparency = 0.2
-    
-    local mesh = Instance.new("SpecialMesh", hatData.hat)
-    mesh.MeshType = Enum.MeshType.FileMesh
-    mesh.MeshId = "rbxassetid://1778999"
-    mesh.Scale = Vector3.new(1.8, 0.6, 1.8)
-    
-    -- Создаем градиентные слои
-    for i = 1, 3 do
+    hatData.hat.Transparency = getgenv().aim_settings.china_hat_transparency or 0.25
+    styleHatPart(hatData.hat)
+
+    hatData.mesh = Instance.new("SpecialMesh", hatData.hat)
+    hatData.mesh.MeshType = Enum.MeshType.FileMesh
+    hatData.mesh.MeshId = "rbxassetid://1778999"
+    hatData.mesh.Scale = Vector3.new(1.8, 0.6, 1.8)
+
+    -- Подсветка: без неё шляпа выглядит наклейкой, висящей в воздухе
+    hatData.light = Instance.new("PointLight", hatData.hat)
+    hatData.light.Color = getClientColor()
+    hatData.light.Range = 10
+    hatData.light.Brightness = 1.2
+    hatData.light.Shadows = false
+
+    for i, spec in ipairs(EXT.chinaHatLayers) do
         local layer = Instance.new("Part")
-        layer.Name = isLocalPlayer and ("ChinaHatLayer" .. i) or ("ChinaHatLayer" .. i .. "_" .. playerName)
-        layer.Size = Vector3.new(3.5, 0.8, 3.5)
-        layer.Shape = Enum.PartType.Block
+        layer.Name = isLocalPlayer and ("ChinaHatLayer" .. i)
+            or ("ChinaHatLayer" .. i .. "_" .. playerName)
         layer.Material = Enum.Material.Neon
-        layer.CanCollide = false
-        layer.Anchored = true
-        layer.Parent = workspace
-        
+        layer.Transparency = spec.transparency
+        layer.Color = getClientColor()
+        styleHatPart(layer)
+
         local layerMesh = Instance.new("SpecialMesh", layer)
         layerMesh.MeshType = Enum.MeshType.FileMesh
         layerMesh.MeshId = "rbxassetid://1778999"
-        
-        -- Градиентные цвета и размеры (используем цвета клиента)
-        local clientColor = getClientColor()
-        if i == 1 then
-            layer.Color = Color3.new(
-                math.max(clientColor.R * 0.75, 0),
-                math.max(clientColor.G * 0.75, 0),
-                math.max(clientColor.B * 0.75, 0)
-            )
-            layer.Transparency = 0.4
-            layerMesh.Scale = Vector3.new(1.9, 0.65, 1.9)
-        elseif i == 2 then
-            layer.Color = clientColor
-            layer.Transparency = 0.3
-            layerMesh.Scale = Vector3.new(1.85, 0.62, 1.85)
-        else
-            layer.Color = Color3.new(
-                math.min(clientColor.R * 1.25, 1),
-                math.min(clientColor.G * 1.25, 1),
-                math.min(clientColor.B * 1.25, 1)
-            )
-            layer.Transparency = 0.5
-            layerMesh.Scale = Vector3.new(1.75, 0.58, 1.75)
-        end
-        
-        table.insert(hatData.layers, layer)
+        layerMesh.Scale = Vector3.new(spec.scale, spec.scale * 0.34, spec.scale)
+
+        hatData.layers[i] = layer
+        hatData.meshes[i] = layerMesh
     end
-    
+
     return hatData
 end
 
 -- Функция обновления позиции China Hat
 local function updateChinaHatPosition(hatData, head, shouldHide)
     if not hatData or not hatData.hat or not hatData.hat.Parent then return end
-    
+
     if shouldHide then
-        -- Скрываем
         hatData.hat.Transparency = 1
+        if hatData.light then hatData.light.Brightness = 0 end
         for _, layer in ipairs(hatData.layers) do
             if layer and layer.Parent then
                 layer.Transparency = 1
             end
         end
-    else
-        -- Показываем и обновляем позицию
-        hatData.hat.Transparency = 0.2
-        
-        local basePosition = head.CFrame * CFrame.new(0, 0.9, 0)
-        hatData.hat.CFrame = basePosition
-        
-        local time = tick()
-        hatData.hat.CFrame = hatData.hat.CFrame * CFrame.Angles(0, math.rad(time * 20), 0)
-        
-        for i, layer in ipairs(hatData.layers) do
-            if layer and layer.Parent then
-                local rotationSpeed = 20 + (i * 5)
-                layer.CFrame = basePosition * CFrame.Angles(0, math.rad(time * rotationSpeed), 0)
-                
-                local pulse = math.sin(time * 3 + i) * 0.1
-                if i == 1 then
-                    layer.Transparency = 0.4 + pulse
-                elseif i == 2 then
-                    layer.Transparency = 0.3 + pulse
-                else
-                    layer.Transparency = 0.5 + pulse
-                end
+        return
+    end
+
+    local s = getgenv().aim_settings
+    local clock = State.chinaHatClock
+    local phase = math.rad(State.chinaHatPhase)
+    local size = s.china_hat_size or 1
+
+    local color = getClientColor()
+    if s.china_hat_rainbow then
+        color = Color3.fromHSV((clock * 0.15) % 1, 0.85, 1)
+    end
+
+    -- Шляпа держится ровно и просто висит над головой. Если брать CFrame
+    -- головы целиком, она заваливается вместе с наклоном взгляда.
+    local hover = math.sin(clock * (s.china_hat_float_speed or 1.6))
+        * (s.china_hat_float or 0.35)
+    local base = CFrame.new(head.Position
+        + Vector3.new(0, (s.china_hat_height or 0.9) + hover, 0))
+
+    hatData.hat.CFrame = base * CFrame.Angles(0, phase, 0)
+    hatData.hat.Color = color
+    hatData.hat.Transparency = s.china_hat_transparency or 0.25
+    -- Материал применяем каждый кадр, иначе смена в меню не подхватывалась бы
+    -- до пересоздания шляпы
+    local material = EXT.chinaHatMaterials[s.china_hat_material] or Enum.Material.Glass
+    hatData.hat.Material = material
+    -- Стеклу нужен блик, без него оно читается как матовый пластик.
+    -- Остальным материалам отражение только мешает.
+    hatData.hat.Reflectance = (material == Enum.Material.Glass) and 0.25 or 0
+
+    if hatData.mesh then
+        hatData.mesh.Scale = Vector3.new(1.8 * size, 0.6 * size, 1.8 * size)
+    end
+
+    if hatData.light then
+        hatData.light.Color = color
+        hatData.light.Brightness = 1.2 + math.sin(clock * 3) * 0.4
+        hatData.light.Range = 10 * size
+    end
+
+    for i, layer in ipairs(hatData.layers) do
+        local spec = EXT.chinaHatLayers[i]
+        if layer and layer.Parent and spec then
+            layer.CFrame = base * CFrame.Angles(0, phase * spec.spin, 0)
+            layer.Color = Color3.new(
+                math.clamp(color.R * spec.shade, 0, 1),
+                math.clamp(color.G * spec.shade, 0, 1),
+                math.clamp(color.B * spec.shade, 0, 1)
+            )
+            layer.Transparency = math.clamp(
+                spec.transparency + math.sin(clock * 2.2 + i) * 0.08, 0, 1)
+
+            local layerMesh = hatData.meshes and hatData.meshes[i]
+            if layerMesh then
+                -- Слои чуть «дышат» по радиусу и вразнобой по фазе
+                local breathe = 1 + math.sin(clock * 1.8 + i * 1.3) * 0.03
+                layerMesh.Scale = Vector3.new(
+                    spec.scale * size * breathe,
+                    spec.scale * 0.34 * size,
+                    spec.scale * size * breathe
+                )
             end
         end
     end
@@ -2441,6 +2552,7 @@ local function clearChinaHatState()
         State.chinaHat:Destroy()
         State.chinaHat = nil
     end
+    State.chinaHatData = nil
 
     for _, layer in ipairs(State.chinaHatLayers) do
         if layer then
@@ -2490,6 +2602,7 @@ local MODULE_NAMES = {
     jump_circle_enabled = "Jump Circle",
     cosmetic_enabled = "Cosmetic",
     china_hat = "China Hat",
+    aura_enabled = "Aura",
     clickgui_enabled = "ClickGui",
     prediction_enabled = "Prediction",
     lock_player = "Lock Target",
@@ -3201,83 +3314,289 @@ function updateAimbotCamera()
     end
 end
 
--- [[ HITBOXES FUNCTIONS - NEW SYSTEM ]]
--- Функция для сброса хитбоксов головы
-local function resetHeadHitboxes()
-    for _, v in pairs(G.Plr:GetPlayers()) do
-        if v ~= G.LP and v.Character and v.Character:FindFirstChild("Head") then
-            pcall(function()
-                local head = v.Character.Head
-                head.Size = Vector3.new(1, 1, 1)
-                head.Transparency = 0
-                head.CanCollide = true
-                head.Anchored = false
-                head.Massless = false
-            end)
-        end
+-- ============================================================================
+-- [[ HITBOXES ]] Расширение хитбоксов игроков.
+-- Детали не пересоздаются, а меняются на месте, поэтому оригинальные свойства
+-- обязательно запоминаются. Сброс на "стандартные" значения ломал нестандартные
+-- модели: у R6, R15 и кастомных аватаров размеры головы и корпуса разные.
+-- ============================================================================
+do
+
+-- part -> оригинальные свойства. Ключ - сама деталь: при респавне персонажа
+-- запись отваливается вместе с моделью, живых ссылок на мусор не остаётся.
+local touched = {}
+
+local HITBOX_PARTS = {
+    Head = {"Head"},
+    Body = {"HumanoidRootPart"},
+    Both = {"Head", "HumanoidRootPart"}
+}
+
+local function capture(part)
+    local original = touched[part]
+    if original then return original end
+    original = {
+        size = part.Size,
+        transparency = part.Transparency,
+        color = part.Color,
+        material = part.Material,
+        canCollide = part.CanCollide,
+        canTouch = part.CanTouch,
+        canQuery = part.CanQuery,
+        massless = part.Massless
+    }
+    touched[part] = original
+    return original
+end
+
+-- Пишем только изменившееся: свойства деталей реплицируются, а обновление идёт
+-- каждый кадр - слепая перезапись давала бы лишний трафик и просадку fps.
+local function setProp(part, prop, value)
+    if part[prop] ~= value then
+        part[prop] = value
     end
 end
 
--- Функция для сброса хитбоксов тела
-local function resetBodyHitboxes()
-    for _, v in pairs(G.Plr:GetPlayers()) do
-        if v ~= G.LP and v.Character and v.Character:FindFirstChild("HumanoidRootPart") then
-            pcall(function()
-                local hrp = v.Character.HumanoidRootPart
-                hrp.Size = Vector3.new(2, 2, 1)
-                hrp.Transparency = 1
-                hrp.CanCollide = true
-            end)
-        end
+local function restore(part)
+    local original = touched[part]
+    if not original then return end
+    touched[part] = nil
+    if not part.Parent then return end
+    pcall(function()
+        setProp(part, "Size", original.size)
+        setProp(part, "Transparency", original.transparency)
+        setProp(part, "Color", original.color)
+        setProp(part, "Material", original.material)
+        setProp(part, "CanCollide", original.canCollide)
+        setProp(part, "CanTouch", original.canTouch)
+        setProp(part, "CanQuery", original.canQuery)
+        setProp(part, "Massless", original.massless)
+    end)
+end
+
+local function restoreAll()
+    for part in pairs(touched) do
+        restore(part)
+    end
+    touched = {}
+end
+
+local function applyPart(part, s, size)
+    local original = capture(part)
+
+    setProp(part, "Size", Vector3.new(size, size, size))
+    -- Раздутая деталь не должна толкать игроков и мешать физике
+    setProp(part, "CanCollide", false)
+    setProp(part, "Massless", true)
+    -- Попадание считается по Touch и по лучу, поэтому нужно и то, и другое
+    setProp(part, "CanTouch", true)
+    setProp(part, "CanQuery", true)
+
+    if s.hitboxes_visualization then
+        setProp(part, "Transparency", s.hitboxes_transparency)
+        setProp(part, "Color", s.hitboxes_color)
+        setProp(part, "Material", Enum.Material.Neon)
+    else
+        -- Визуализация выключена: деталь выглядит ровно как была
+        setProp(part, "Transparency", original.transparency)
+        setProp(part, "Color", original.color)
+        setProp(part, "Material", original.material)
     end
 end
 
--- Главная функция обновления хитбоксов
-local function updateHitboxes()
-    if not getgenv().aim_settings.hitboxes_enabled then
+local function shouldAffect(player, s, myPos)
+    if player == G.LP then return false end
+    if not player.Character then return false end
+    if isFriend(player.Name) then return false end
+
+    if s.hitboxes_ignore_team and player.Team ~= nil and player.Team == G.LP.Team then
+        return false
+    end
+
+    -- Труп трогать незачем, а после респавна деталь будет уже другая
+    local humanoid = player.Character:FindFirstChildOfClass("Humanoid")
+    if not humanoid or humanoid.Health <= 0 then return false end
+
+    local limit = s.hitboxes_max_distance or 0
+    if limit > 0 then
+        if not myPos then return false end
+        local root = player.Character:FindFirstChild("HumanoidRootPart")
+            or player.Character.PrimaryPart
+        if not root then return false end
+        if (root.Position - myPos).Magnitude > limit then return false end
+    end
+
+    return true
+end
+
+function EXT.updateHitboxes()
+    local s = getgenv().aim_settings
+
+    if not s.hitboxes_enabled then
         if State.hitboxesActive then
-            resetHeadHitboxes()
-            resetBodyHitboxes()
+            restoreAll()
             State.hitboxesActive = false
         end
         return
     end
-    
+
     State.hitboxesActive = true
-    local partName = getgenv().aim_settings.hitboxes_part
-    local size = getgenv().aim_settings.hitboxes_size
-    local transparency = getgenv().aim_settings.hitboxes_transparency
-    local color = getgenv().aim_settings.hitboxes_color
-    
-    for _, v in pairs(G.Plr:GetPlayers()) do
-        if v ~= G.LP and v.Character and not isFriend(v.Name) then
-            if partName == "Head" and v.Character:FindFirstChild("Head") then
-                pcall(function()
-                    local head = v.Character.Head
-                    head.Size = Vector3.new(size, size, size)
-                    head.Transparency = transparency
-                    head.Color = color
-                    head.Material = Enum.Material.Neon
-                    head.CanCollide = false
-                    head.Anchored = false
-                    head.Massless = true
-                    head.CanTouch = true
-                    head.CanQuery = true
-                end)
-            elseif partName == "Body" and v.Character:FindFirstChild("HumanoidRootPart") then
-                pcall(function()
-                    local hrp = v.Character.HumanoidRootPart
-                    hrp.Size = Vector3.new(size, size, size)
-                    hrp.Transparency = transparency
-                    hrp.Color = color
-                    hrp.Material = Enum.Material.Neon
-                    hrp.CanCollide = false
-                    hrp.CanTouch = true
-                    hrp.CanQuery = true
-                end)
+
+    local names = HITBOX_PARTS[s.hitboxes_part] or HITBOX_PARTS.Head
+    local size = math.max(s.hitboxes_size or 1, 0.1)
+    local myRoot = G.LP.Character and G.LP.Character:FindFirstChild("HumanoidRootPart")
+    local myPos = myRoot and myRoot.Position or nil
+
+    local keep = {}
+    for _, player in ipairs(G.Plr:GetPlayers()) do
+        if shouldAffect(player, s, myPos) then
+            for _, name in ipairs(names) do
+                local part = player.Character:FindFirstChild(name)
+                if part and part:IsA("BasePart") then
+                    keep[part] = true
+                    pcall(applyPart, part, s, size)
+                end
             end
         end
     end
+
+    -- Смена детали, выход игрока, добавление в друзья, уход за дистанцию,
+    -- смерть, респавн - все случаи сходятся сюда: деталь больше не в списке,
+    -- значит её нужно вернуть в исходное состояние.
+    for part in pairs(touched) do
+        if not keep[part] then
+            restore(part)
+        end
+    end
+end
+
+end
+
+-- ============================================================================
+-- [[ AURA ]] Ленты, вьющиеся вокруг игрока.
+-- Каждая змейка - маленькая деталь на орбите с Trail между двумя точками.
+-- Ленту рисует движок по следу детали, поэтому она остаётся гладкой при любом
+-- fps, а не распадается на отрезки, как было бы при ручной отрисовке.
+-- ============================================================================
+do
+
+local snakes = {}
+local folder = nil
+
+function EXT.clearAura()
+    for _, snake in ipairs(snakes) do
+        pcall(function() snake.part:Destroy() end)
+    end
+    snakes = {}
+    if folder then
+        pcall(function() folder:Destroy() end)
+        folder = nil
+    end
+    State.auraActive = false
+end
+
+local function buildSnake(index)
+    local part = Instance.new("Part")
+    part.Name = "AuraSnake" .. index
+    part.Size = Vector3.new(0.2, 0.2, 0.2)
+    part.Shape = Enum.PartType.Ball
+    part.Material = Enum.Material.Neon
+    part.Transparency = 0.15
+    part.Anchored = true
+    part.CanCollide = false
+    part.CanTouch = false
+    part.CanQuery = false
+    part.CastShadow = false
+    part.Locked = true
+    part.Parent = folder
+
+    -- Trail тянется между двумя точками детали: расстояние между ними и есть
+    -- ширина ленты, поэтому ширина настраивается сдвигом привязок.
+    local a0 = Instance.new("Attachment", part)
+    a0.Position = Vector3.new(0, 0.15, 0)
+    local a1 = Instance.new("Attachment", part)
+    a1.Position = Vector3.new(0, -0.15, 0)
+
+    local trail = Instance.new("Trail", part)
+    trail.Attachment0 = a0
+    trail.Attachment1 = a1
+    trail.Lifetime = 0.6
+    trail.MinLength = 0
+    trail.FaceCamera = true
+    trail.LightEmission = 1
+    trail.LightInfluence = 0
+    trail.Transparency = NumberSequence.new({
+        NumberSequenceKeypoint.new(0.0, 0.1),
+        NumberSequenceKeypoint.new(1.0, 1.0)
+    })
+
+    return {part = part, trail = trail, a0 = a0, a1 = a1}
+end
+
+function EXT.updateAura(dt)
+    local s = getgenv().aim_settings
+    local character = G.LP.Character
+    local root = character
+        and (character:FindFirstChild("HumanoidRootPart") or character.PrimaryPart)
+
+    if not (s.cosmetic_enabled and s.aura_enabled and root) then
+        if State.auraActive or folder then EXT.clearAura() end
+        return
+    end
+
+    State.auraClock = State.auraClock + dt
+    State.auraActive = true
+
+    local count = math.clamp(math.floor(s.aura_count or 4), 1, 10)
+    if #snakes ~= count or not folder then
+        EXT.clearAura()
+        folder = Instance.new("Folder")
+        folder.Name = "MoonwareAura"
+        folder.Parent = workspace
+        for i = 1, count do
+            snakes[i] = buildSnake(i)
+        end
+        State.auraActive = true
+    end
+
+    local clock = State.auraClock
+    local center = root.Position
+    local radius = s.aura_radius or 4
+    local speed = s.aura_speed or 2
+    local wave = s.aura_wave or 2
+    local width = s.aura_width or 0.3
+    local base = getClientColor()
+
+    for i, snake in ipairs(snakes) do
+        local phase = ((i - 1) / count) * math.pi * 2
+
+        -- Радиус и высота ходят со своими частотами, не кратными обороту.
+        -- Из-за этого путь не замыкается в круг, а вьётся змейкой.
+        local angle = clock * speed + phase
+        local r = radius * (1 + math.sin(clock * 1.7 + phase) * 0.25)
+        local y = math.sin(clock * 2.3 + phase * 1.5) * wave
+
+        snake.part.Position = center
+            + Vector3.new(math.cos(angle) * r, y, math.sin(angle) * r)
+
+        local color = base
+        if s.aura_rainbow then
+            color = Color3.fromHSV((clock * 0.15 + (i - 1) / count) % 1, 0.9, 1)
+        end
+        snake.part.Color = color
+        -- ColorSequence пересобираем только при смене цвета: без радуги он
+        -- постоянный, и создавать его каждый кадр значило бы зря сорить мусором
+        if snake.color ~= color then
+            snake.color = color
+            snake.trail.Color = ColorSequence.new(color)
+        end
+        snake.trail.Lifetime = s.aura_trail_life or 0.6
+
+        snake.a0.Position = Vector3.new(0, width, 0)
+        snake.a1.Position = Vector3.new(0, -width, 0)
+    end
+end
+
 end
 
 -- [[ VIEWMODEL FUNCTIONS ]]
@@ -3523,14 +3842,35 @@ function CategoryPanel.new(name, x, y, width)
         self.dragStart = Vector2.new(mousePos.X, mousePos.Y)
         self.startPos = self.frame.Position
     end)
+    -- Содержимое живёт в прокручиваемой области под шапкой. Раньше UIListLayout
+    -- стоял на самой панели, и она просто росла под содержимое - у длинных
+    -- категорий нижние настройки уезжали за край экрана.
+    self.content = Instance.new("ScrollingFrame", self.frame)
+    self.content.Name = "Content"
+    self.content.Position = UDim2.new(0, 0, 0, 40)
+    self.content.Size = UDim2.new(1, 0, 1, -40)
+    self.content.BackgroundTransparency = 1
+    self.content.BorderSizePixel = 0
+    self.content.ClipsDescendants = true
+    self.content.ScrollingDirection = Enum.ScrollingDirection.Y
+    self.content.ElasticBehavior = Enum.ElasticBehavior.Never
+    self.content.ScrollBarThickness = 3
+    self.content.ScrollBarImageColor3 = getClientColor()
+    self.content.ScrollBarImageTransparency = 0.35
+    self.content.CanvasSize = UDim2.new(0, 0, 0, 0)
+
+    registerUIRefresher(function()
+        self.content.ScrollBarImageColor3 = getClientColor()
+    end)
+
     -- Layout
-    self.layout = Instance.new("UIListLayout", self.frame)
+    self.layout = Instance.new("UIListLayout", self.content)
     self.layout.SortOrder = Enum.SortOrder.LayoutOrder
     self.layout.Padding = UDim.new(0, 6)
     self.layout.HorizontalAlignment = Enum.HorizontalAlignment.Center
-    
+
     -- Spacer for top padding with gradient divider
-    local topSpacer = Instance.new("Frame", self.frame)
+    local topSpacer = Instance.new("Frame", self.content)
     topSpacer.Size = UDim2.new(1, -16, 0, 4)
     topSpacer.BackgroundTransparency = 1
     topSpacer.LayoutOrder = 1
@@ -3549,8 +3889,6 @@ function CategoryPanel.new(name, x, y, width)
     })
     
     self.layout:GetPropertyChangedSignal("AbsoluteContentSize"):Connect(function()
-        local targetSize = UDim2.new(0, self.width, 0, self.layout.AbsoluteContentSize.Y + 10)
-
         if panelAnimationState == "visible" and (self.frame.AnchorPoint.X ~= 0 or self.frame.AnchorPoint.Y ~= 0) then
             local currentPosition = self.frame.Position
             local topLeftX = currentPosition.X.Offset - (self.frame.Size.X.Offset * self.frame.AnchorPoint.X)
@@ -3559,20 +3897,63 @@ function CategoryPanel.new(name, x, y, width)
             self.frame.Position = UDim2.new(currentPosition.X.Scale, topLeftX, currentPosition.Y.Scale, topLeftY)
         end
 
-        if panelAnimationState == "visible" then
-            self.frame.Size = targetSize
-        else
-            tw(self.frame, {Size = targetSize}, 0.3)
-        end
+        self:applyHeight(panelAnimationState ~= "visible")
     end)
-    
+
     return self
 end
 
+-- Полотно прокрутки. Часть панели может оказаться ниже края экрана - когда её
+-- утащили вниз или когда она выросла под содержимое. Добавляем к полотну ровно
+-- столько же: размер и положение панели остаются нетронутыми, но последние
+-- пункты можно доскроллить вверх, в видимую область.
+function CategoryPanel:refreshCanvas()
+    local guiHeight = ScreenGui.AbsoluteSize.Y
+    local top = self.frame.AbsolutePosition.Y - ScreenGui.AbsolutePosition.Y
+    local hidden = math.max((top + self.frame.Size.Y.Offset) - guiHeight, 0)
+
+    -- Запас снизу: без него последний пункт упирается в скруглённый край
+    -- панели и дочитать его до конца невозможно.
+    self.content.CanvasSize = UDim2.new(0, 0, 0,
+        self.layout.AbsoluteContentSize.Y + 20 + hidden)
+end
+
+-- Высота панели зависит ТОЛЬКО от содержимого и высоты экрана - не от того,
+-- где панель стоит. Когда предел считался от её положения, панель работала как
+-- гармошка: низ прижат к краю экрана, за курсором тянулся только верх.
+function CategoryPanel:applyHeight(animate)
+    local canvasHeight = self.layout.AbsoluteContentSize.Y + 20
+
+    -- Меряем в системе координат самого ScreenGui: у ScreenGui с
+    -- IgnoreGuiInset = false начало отсчёта сдвинуто на высоту верхней панели.
+    local maxHeight = ScreenGui.AbsoluteSize.Y - 60
+    local target = canvasHeight + 40
+
+    if maxHeight > 140 and target > maxHeight then
+        target = maxHeight
+    end
+
+    local size = UDim2.new(0, self.width, 0, target)
+    if animate then
+        tw(self.frame, {Size = size}, 0.3)
+    else
+        self.frame.Size = size
+    end
+
+    self:refreshCanvas()
+end
+
 function CategoryPanel:update()
+    -- Полотно пересчитываем каждый кадр: оно зависит от положения панели,
+    -- а размер панели при этом не меняется - гармошки не будет.
+    self:refreshCanvas()
+
     if self.dragging then
         local mouse = G.UIS:GetMouseLocation()
         local delta = Vector2.new(mouse.X - self.dragStart.X, mouse.Y - self.dragStart.Y)
+        -- Панель просто едет за курсором. Ни размер, ни границы экрана здесь
+        -- не трогаем: от подгонки размера она складывалась гармошкой, а от
+        -- ограничения по экрану её подбрасывало вверх.
         self.frame.Position = UDim2.new(
             0,
             self.startPos.X.Offset + delta.X,
@@ -3595,7 +3976,7 @@ function CategoryPanel:addModule(moduleName, settingKey, hasSettings)
 
     MODULE_NAMES[settingKey] = moduleName
     
-    local container = Instance.new("Frame", self.frame)
+    local container = Instance.new("Frame", self.content)
     container.Size = UDim2.new(1, -16, 0, 34)
     container.BackgroundTransparency = 1
     container.ClipsDescendants = true
@@ -3751,6 +4132,7 @@ function CategoryPanel:addModule(moduleName, settingKey, hasSettings)
         getgenv().aim_settings[settingKey] = state
         tw(btn, {BackgroundColor3 = state and getClientColor() or THEME.MODULE_BG}, 0.2)
         EXT.notifyToggle(settingKey, state)
+        EXT.ripple(btn)
     end)
     
     btn.MouseButton2Click:Connect(function()
@@ -3816,6 +4198,10 @@ function CategoryPanel:addBoolean(moduleData, name, settingKey)
     check.Font = Enum.Font.GothamBold
     check.TextSize = 12
     
+    -- Масштаб для отскока при переключении
+    local checkScale = Instance.new("UIScale", checkContainer)
+    checkScale.Scale = 1
+
     local function update()
         local val = getgenv().aim_settings[settingKey]
         check.Text = val and "✓" or "X"
@@ -3843,6 +4229,11 @@ function CategoryPanel:addBoolean(moduleData, name, settingKey)
     frame.MouseButton1Click:Connect(function()
         getgenv().aim_settings[settingKey] = not getgenv().aim_settings[settingKey]
         update()
+        -- Отскок: резко увеличиваем и плавно возвращаем
+        if getgenv().aim_settings.clickgui_animations then
+            checkScale.Scale = 1.45
+            tw(checkScale, {Scale = 1}, 0.28)
+        end
     end)
     
     table.insert(moduleData.settings, frame)
@@ -4252,28 +4643,59 @@ function CategoryPanel:addSlider(moduleData, name, settingKey, min, max, inc)
     Instance.new("UICorner", knob).CornerRadius = UDim.new(1, 0)
     
     local dragging = false
-    
+
+    -- Знаков после запятой ровно столько, сколько имеет смысл при таком шаге:
+    -- у целого ползунка "265" вместо "265.00".
+    local valueFormat = "%.0f"
+    if inc < 0.1 then
+        valueFormat = "%.2f"
+    elseif inc < 1 then
+        valueFormat = "%.1f"
+    end
+
     local function applySliderValue(value)
         getgenv().aim_settings[settingKey] = value
-        valLbl.Text = string.format("%.2f", value)
+        valLbl.Text = string.format(valueFormat, value)
         tw(fill, {Size = UDim2.new(math.clamp((value - min) / (max - min), 0, 1), 0, 1, 0)}, 0.1)
+    end
+
+    -- Шаг отсчитывается от нуля, а не от минимума: так значения выходят
+    -- круглыми (260, 265, 270), а не привязанными к произвольному началу шкалы.
+    -- Края отдают ровно min и max - иначе крайние значения были бы недостижимы,
+    -- когда границы не кратны шагу.
+    local function snapValue(pos)
+        if pos <= 0 then return min end
+        if pos >= 1 then return max end
+        local value = math.floor((min + (max - min) * pos) / inc + 0.5) * inc
+        -- Умножение на дробный шаг оставляет мусор в младших разрядах
+        value = math.floor(value * 1000 + 0.5) / 1000
+        return math.clamp(value, min, max)
     end
 
     local function updateSlider(input)
         local pos = math.clamp((input.Position.X - track.AbsolutePosition.X) / track.AbsoluteSize.X, 0, 1)
-        local value = math.floor((min + (max - min) * pos) / inc + 0.5) * inc
-        applySliderValue(value)
+        applySliderValue(snapValue(pos))
     end
     
     track.InputBegan:Connect(function(input)
         if input.UserInputType == Enum.UserInputType.MouseButton1 then
             dragging = true
             updateSlider(input)
+            if getgenv().aim_settings.clickgui_animations then
+                tw(knob, {Size = UDim2.new(0, 16, 0, 16),
+                    Position = UDim2.new(1, -8, 0.5, -8)}, 0.15)
+                tw(track, {Size = UDim2.new(1, -24, 0, 6)}, 0.15)
+            end
         end
     end)
     
     G.UIS.InputEnded:Connect(function(input)
-        if input.UserInputType == Enum.UserInputType.MouseButton1 then dragging = false end
+        if input.UserInputType == Enum.UserInputType.MouseButton1 and dragging then
+            dragging = false
+            tw(knob, {Size = UDim2.new(0, 10, 0, 10),
+                Position = UDim2.new(1, -5, 0.5, -5)}, 0.15)
+            tw(track, {Size = UDim2.new(1, -24, 0, 4)}, 0.15)
+        end
     end)
     
     G.UIS.InputChanged:Connect(function(input)
@@ -4286,7 +4708,7 @@ function CategoryPanel:addSlider(moduleData, name, settingKey, min, max, inc)
     end)
     
     local startVal = getgenv().aim_settings[settingKey]
-    valLbl.Text = string.format("%.2f", startVal)
+    valLbl.Text = string.format(valueFormat, startVal)
     fill.Size = UDim2.new(math.clamp((startVal - min) / (max - min), 0, 1), 0, 1, 0)
     
     table.insert(moduleData.settings, frame)
@@ -4336,7 +4758,7 @@ function CategoryPanel:addDropdown(moduleData, name, settingKey, options)
 end
 
 function CategoryPanel:addTextBox(name, settingKey, placeholder)
-    local frame = Instance.new("Frame", self.frame)
+    local frame = Instance.new("Frame", self.content)
     frame.Size = UDim2.new(1, -16, 0, 50)
     frame.BackgroundTransparency = 1
     frame.LayoutOrder = #self.modules + 2
@@ -4472,7 +4894,7 @@ local function getVisibleKeybindEntries()
 end
 
 function CategoryPanel:addButton(name, callback)
-    local frame = Instance.new("Frame", self.frame)
+    local frame = Instance.new("Frame", self.content)
     frame.Size = UDim2.new(1, -16, 0, 34)
     frame.BackgroundTransparency = 1
     frame.LayoutOrder = #self.modules + 2
@@ -4506,7 +4928,7 @@ function CategoryPanel:addButton(name, callback)
 end
 
 function CategoryPanel:addCustomElement(element)
-    element.Parent = self.frame
+    element.Parent = self.content
     element.LayoutOrder = #self.modules + 2
     return element
 end
@@ -4822,7 +5244,8 @@ end
 EXT.PANIC_KEYS = {
     "enabled", "esp_enabled", "esp_box", "esp_tracers", "target_esp", "target_hud",
     "friend_markers", "arrows", "rainbow_fov", "rainbow_crosshair", "jump_circle_enabled",
-    "cosmetic_enabled", "china_hat", "china_hat_friends", "trails_enabled",
+    "cosmetic_enabled", "china_hat", "china_hat_friends", "aura_enabled",
+    "trails_enabled",
     "tp_walk_enabled", "target_strafe_enabled", "infinite_jump_enabled", "spider_enabled",
     "air_stuck_enabled", "smooth_fall_enabled", "speed_enabled", "safe_walk_enabled",
     "fly_enabled", "clumsy_enabled", "freecam_enabled", "noclip_enabled", "anti_fling",
@@ -5097,7 +5520,7 @@ EXT.SearchBox.Size = UDim2.new(1, -20, 1, -6)
 EXT.SearchBox.Position = UDim2.new(0, 10, 0, 3)
 EXT.SearchBox.BackgroundTransparency = 1
 EXT.SearchBox.Text = ""
-EXT.SearchBox.PlaceholderText = "Поиск модуля..."
+EXT.SearchBox.PlaceholderText = "Search module..."
 EXT.SearchBox.TextColor3 = THEME.TEXT_TITLE
 EXT.SearchBox.PlaceholderColor3 = THEME.TEXT_DIM
 EXT.SearchBox.Font = Enum.Font.Gotham
@@ -5268,15 +5691,24 @@ local function collectActive()
 end
 
 local function buildRow(item, index)
+    -- Внешний контейнер держит место в UIListLayout, внутренний ездит:
+    -- саму строку двигать нельзя, её позицию задаёт layout.
     local row = Instance.new("Frame", EXT.Arraylist)
     row.Name = "Row_" .. item.name
     row.Size = UDim2.new(0, item.width + 22, 0, 18)
-    row.BackgroundColor3 = Color3.fromRGB(14, 14, 18)
-    row.BackgroundTransparency = 0.15
+    row.BackgroundTransparency = 1
     row.BorderSizePixel = 0
     row.LayoutOrder = index
+    row.ClipsDescendants = false
 
-    local label = Instance.new("TextLabel", row)
+    local inner = Instance.new("Frame", row)
+    inner.Name = "Inner"
+    inner.Size = UDim2.new(1, 0, 1, 0)
+    inner.BackgroundColor3 = Color3.fromRGB(14, 14, 18)
+    inner.BackgroundTransparency = 0.15
+    inner.BorderSizePixel = 0
+
+    local label = Instance.new("TextLabel", inner)
     label.Name = "Label"
     label.Size = UDim2.new(1, -12, 1, 0)
     label.Position = UDim2.new(0, 6, 0, 0)
@@ -5289,19 +5721,153 @@ local function buildRow(item, index)
     label.TextStrokeTransparency = 0.6
 
     -- Акцентная полоса справа, как в классических клиентах
-    local bar = Instance.new("Frame", row)
+    local bar = Instance.new("Frame", inner)
     bar.Name = "Bar"
     bar.Size = UDim2.new(0, 2, 1, 0)
     bar.Position = UDim2.new(1, -2, 0, 0)
     bar.BorderSizePixel = 0
     bar.BackgroundColor3 = getClientColor()
 
-    -- Въезд справа
-    row.Position = UDim2.new(0, 40, 0, 0)
-    label.TextTransparency = 1
-    tw(label, {TextTransparency = 0}, 0.22)
+    if getgenv().aim_settings.clickgui_animations then
+        inner.Position = UDim2.new(1, 10, 0, 0)
+        inner.BackgroundTransparency = 1
+        label.TextTransparency = 1
+        tw(inner, {Position = UDim2.new(0, 0, 0, 0), BackgroundTransparency = 0.15}, 0.28)
+        tw(label, {TextTransparency = 0}, 0.28)
+    end
 
     return row
+end
+
+-- Уезд вправо с последующим удалением
+local function retireRow(row)
+    if not (row and row.Parent) then return end
+    local inner = row:FindFirstChild("Inner")
+    if inner and getgenv().aim_settings.clickgui_animations then
+        local label = inner:FindFirstChild("Label")
+        row.ClipsDescendants = true
+        tw(row, {Size = UDim2.new(0, row.Size.X.Offset, 0, 0)}, 0.22)
+        tw(inner, {Position = UDim2.new(1, 10, 0, 0), BackgroundTransparency = 1}, 0.22)
+        if label then
+            tw(label, {TextTransparency = 1}, 0.22)
+        end
+        task.delay(0.26, function()
+            pcall(function() row:Destroy() end)
+        end)
+    else
+        row:Destroy()
+    end
+end
+
+-- ------------------------------------------------------- KEYBIND LIST
+-- Строка держит место в UIListLayout, а ездит вложенный контейнер:
+-- саму строку двигать нельзя, её позицию задаёт layout.
+function EXT.buildKeybindRow(name)
+    local item = Instance.new("Frame", EXT.KeybindContent)
+    item.Name = "Bind_" .. name
+    -- Отступ по бокам с запасом: слева проходит акцентная полоса
+    item.Size = UDim2.new(1, -22, 0, 20)
+    item.BackgroundTransparency = 1
+    item.ZIndex = 100
+
+    local inner = Instance.new("Frame", item)
+    inner.Name = "Inner"
+    inner.Size = UDim2.new(1, 0, 1, 0)
+    inner.BackgroundTransparency = 1
+    inner.ZIndex = 100
+
+    local nameLbl = Instance.new("TextLabel", inner)
+    nameLbl.Name = "Name"
+    nameLbl.Size = UDim2.new(0.6, 0, 1, 0)
+    nameLbl.BackgroundTransparency = 1
+    nameLbl.TextColor3 = THEME.TEXT_DIM
+    nameLbl.Font = Enum.Font.Gotham
+    nameLbl.TextSize = 11
+    nameLbl.TextXAlignment = Enum.TextXAlignment.Left
+    nameLbl.ZIndex = 101
+
+    local keyLbl = Instance.new("TextLabel", inner)
+    keyLbl.Name = "Key"
+    keyLbl.Size = UDim2.new(0.4, 0, 1, 0)
+    keyLbl.Position = UDim2.new(0.6, 0, 0, 0)
+    keyLbl.BackgroundTransparency = 1
+    keyLbl.Font = Enum.Font.GothamBold
+    keyLbl.TextSize = 11
+    keyLbl.TextXAlignment = Enum.TextXAlignment.Right
+    keyLbl.ZIndex = 101
+
+    local stateLbl = Instance.new("TextLabel", inner)
+    stateLbl.Name = "State"
+    stateLbl.Size = UDim2.new(0, 34, 1, 0)
+    stateLbl.Position = UDim2.new(1, -70, 0, 0)
+    stateLbl.BackgroundTransparency = 1
+    stateLbl.Font = Enum.Font.GothamBold
+    stateLbl.TextSize = 10
+    stateLbl.TextXAlignment = Enum.TextXAlignment.Right
+    stateLbl.ZIndex = 101
+
+    if getgenv().aim_settings.clickgui_animations then
+        inner.Position = UDim2.new(1, 20, 0, 0)
+        nameLbl.TextTransparency = 1
+        keyLbl.TextTransparency = 1
+        stateLbl.TextTransparency = 1
+        tw(inner, {Position = UDim2.new(0, 0, 0, 0)}, 0.3)
+        tw(nameLbl, {TextTransparency = 0}, 0.3)
+        tw(keyLbl, {TextTransparency = 0}, 0.3)
+        tw(stateLbl, {TextTransparency = 0}, 0.3)
+    end
+
+    return item
+end
+
+function EXT.updateKeybindRow(item, bindEntry, keyCode)
+    local inner = item:FindFirstChild("Inner")
+    if not inner then return end
+
+    local nameLbl = inner:FindFirstChild("Name")
+    local keyLbl = inner:FindFirstChild("Key")
+    local stateLbl = inner:FindFirstChild("State")
+
+    if nameLbl then nameLbl.Text = bindEntry.name end
+    if keyLbl then
+        keyLbl.Text = "[" .. getKeyName(keyCode)
+            .. (bindEntry.hold and " hold" or "") .. "]"
+        keyLbl.TextColor3 = getClientColor()
+    end
+    if stateLbl then
+        local wasOn = stateLbl.Text == "ON"
+        stateLbl.Text = bindEntry.active and "ON" or "OFF"
+        stateLbl.TextColor3 = bindEntry.active
+            and Color3.fromRGB(90, 210, 120) or THEME.TEXT_DIM
+
+        -- Вспышка при смене состояния
+        if wasOn ~= bindEntry.active and getgenv().aim_settings.clickgui_animations then
+            stateLbl.TextTransparency = 1
+            tw(stateLbl, {TextTransparency = 0}, 0.25)
+        end
+    end
+end
+
+function EXT.retireKeybindRow(item)
+    if not (item and item.Parent) then return end
+    local inner = item:FindFirstChild("Inner")
+    if inner and getgenv().aim_settings.clickgui_animations then
+        -- Схлопываем высоту самой строки, иначе она держит место
+        -- в UIListLayout всю анимацию и под списком остаётся пустота
+        item.ClipsDescendants = true
+        tw(item, {Size = UDim2.new(1, -16, 0, 0)}, 0.22)
+        tw(inner, {Position = UDim2.new(1, 20, 0, 0)}, 0.22)
+        for _, child in ipairs(inner:GetChildren()) do
+            if child:IsA("TextLabel") then
+                tw(child, {TextTransparency = 1}, 0.22)
+            end
+        end
+        task.delay(0.26, function()
+            pcall(function() item:Destroy() end)
+        end)
+    else
+        item:Destroy()
+    end
 end
 
 function EXT.updateArraylist()
@@ -5311,10 +5877,10 @@ function EXT.updateArraylist()
 
     if not show then
         if next(arrayRows) ~= nil then
-            for _, row in pairs(arrayRows) do
-                if row then row:Destroy() end
+            for name, row in pairs(arrayRows) do
+                retireRow(row)
+                arrayRows[name] = nil
             end
-            arrayRows = {}
             arraySignature = nil
         end
         return
@@ -5327,31 +5893,43 @@ function EXT.updateArraylist()
         signature = signature .. item.name .. ";"
     end
 
-    -- Пересобираем только при изменении набора, иначе каждый кадр
-    -- уничтожались бы и создавались все строки.
+    -- Сверяем по именам: существующие строки остаются на месте, новые
+    -- въезжают, исчезнувшие уезжают. Полная пересборка обрывала бы анимацию.
     if signature ~= arraySignature then
         arraySignature = signature
-        for _, row in pairs(arrayRows) do
-            if row then row:Destroy() end
-        end
-        arrayRows = {}
+
+        local present = {}
         for index, item in ipairs(items) do
-            arrayRows[index] = buildRow(item, index)
+            present[item.name] = true
+            local row = arrayRows[item.name]
+            if row and row.Parent then
+                row.LayoutOrder = index
+            else
+                arrayRows[item.name] = buildRow(item, index)
+            end
+        end
+
+        for name, row in pairs(arrayRows) do
+            if not present[name] then
+                retireRow(row)
+                arrayRows[name] = nil
+            end
         end
     end
 
     -- Цвета обновляем каждый кадр: цвет клиента и радуга должны быть живыми
     local total = #items
-    for index, row in pairs(arrayRows) do
-        if row and row.Parent then
+    for index, item in ipairs(items) do
+        local row = arrayRows[item.name]
+        local inner = row and row.Parent and row:FindFirstChild("Inner")
+        if inner then
             local color = EXT.gradientColor(index, total)
-            local bar = row:FindFirstChild("Bar")
+            local bar = inner:FindFirstChild("Bar")
             if bar then bar.BackgroundColor3 = color end
-            local label = row:FindFirstChild("Label")
-            if label and s.hud_arraylist_colored_text then
-                label.TextColor3 = color
-            elseif label then
-                label.TextColor3 = Color3.fromRGB(255, 255, 255)
+            local label = inner:FindFirstChild("Label")
+            if label then
+                label.TextColor3 = s.hud_arraylist_colored_text
+                    and color or Color3.fromRGB(255, 255, 255)
             end
         end
     end
@@ -5364,31 +5942,50 @@ EXT.styleCard(SpeedLabel, 8)
 EXT.styleCard(PlayerInfoLabel, 8)
 EXT.styleCard(TargetHudFrame, 10)
 
--- Акцентная полоска слева у карточек
-local function addAccent(frame, name)
+-- Текст в карточках должен отступать от акцентной полосы.
+-- Отступ задаётся до создания полосок: addAccent читает UIPadding карточки.
+SpeedLabel.TextXAlignment = Enum.TextXAlignment.Left
+local speedPad = Instance.new("UIPadding", SpeedLabel)
+speedPad.PaddingLeft = UDim.new(0, 16)
+
+-- Акцентная полоска у левого края карточки
+local function addAccent(frame)
+    -- UIPadding сдвигает не только текст, но и дочерние элементы. Без поправки
+    -- полоска уезжала внутрь карточки и налезала на первую букву.
+    local pad = frame:FindFirstChildOfClass("UIPadding")
+    local padLeft = pad and pad.PaddingLeft.Offset or 0
+    local padY = pad and (pad.PaddingTop.Offset + pad.PaddingBottom.Offset) or 0
+
     local accent = Instance.new("Frame", frame)
-    accent.Name = name
-    accent.Size = UDim2.new(0, 2, 1, -10)
-    accent.Position = UDim2.new(0, 0, 0, 5)
+    accent.Name = "Accent"
+    accent.AnchorPoint = Vector2.new(0, 0.5)
+    accent.Position = UDim2.new(0, 3 - padLeft, 0.5, 0)
+    accent.Size = UDim2.new(0, 3, 1, padY - 12)
     accent.BorderSizePixel = 0
     accent.BackgroundColor3 = getClientColor()
     accent.Visible = false
-    accent.ZIndex = 5
+    accent.ZIndex = frame.ZIndex + 1
     Instance.new("UICorner", accent).CornerRadius = UDim.new(1, 0)
+
+    -- Затухание к торцам: ровная плашка выглядит наклейкой, а не акцентом
+    local gradient = Instance.new("UIGradient", accent)
+    gradient.Rotation = 90
+    gradient.Transparency = NumberSequence.new({
+        NumberSequenceKeypoint.new(0.00, 0.75),
+        NumberSequenceKeypoint.new(0.30, 0.00),
+        NumberSequenceKeypoint.new(0.70, 0.00),
+        NumberSequenceKeypoint.new(1.00, 0.75)
+    })
+
     return accent
 end
 
 EXT.accents = {
-    watermark = addAccent(WatermarkFrame, "Accent"),
-    keybinds = addAccent(KeybindList, "Accent"),
-    speed = addAccent(SpeedLabel, "Accent"),
-    playerInfo = addAccent(PlayerInfoLabel, "Accent")
+    watermark = addAccent(WatermarkFrame),
+    keybinds = addAccent(KeybindList),
+    speed = addAccent(SpeedLabel),
+    playerInfo = addAccent(PlayerInfoLabel)
 }
-
--- Текст в карточках должен отступать от акцентной полосы
-SpeedLabel.TextXAlignment = Enum.TextXAlignment.Left
-local speedPad = Instance.new("UIPadding", SpeedLabel)
-speedPad.PaddingLeft = UDim.new(0, 12)
 
 EXT.sessionStart = tick()
 
@@ -5412,6 +6009,9 @@ function EXT.updateHudStyle()
             accent.Visible = show
             accent.BackgroundColor3 = color
         end
+    end
+    if EXT.KeybindSplit then
+        EXT.KeybindSplit.BackgroundColor3 = color
     end
 end
 
@@ -5469,7 +6069,39 @@ local hovered = nil
 local hoverAmount = 0
 local allLayers = {}
 
+-- Круг, расходящийся от точки клика. Кнопка обрезает содержимое,
+-- поэтому всплеск не вылезает за её скруглённые углы.
+function EXT.ripple(btn)
+    if not (btn and btn.Parent) then return end
+    if not getgenv().aim_settings.clickgui_animations then return end
+
+    local origin = EXT.mousePosition(ScreenGui.IgnoreGuiInset) - btn.AbsolutePosition
+
+    local circle = Instance.new("Frame", btn)
+    circle.Name = "Ripple"
+    circle.AnchorPoint = Vector2.new(0.5, 0.5)
+    circle.Position = UDim2.new(0, origin.X, 0, origin.Y)
+    circle.Size = UDim2.new(0, 0, 0, 0)
+    circle.BackgroundColor3 = Color3.fromRGB(255, 255, 255)
+    circle.BackgroundTransparency = 0.65
+    circle.BorderSizePixel = 0
+    circle.ZIndex = 1
+    Instance.new("UICorner", circle).CornerRadius = UDim.new(1, 0)
+
+    local size = math.max(btn.AbsoluteSize.X, btn.AbsoluteSize.Y) * 2.4
+    tw(circle, {
+        Size = UDim2.new(0, size, 0, size),
+        BackgroundTransparency = 1
+    }, 0.45)
+
+    task.delay(0.5, function()
+        pcall(function() circle:Destroy() end)
+    end)
+end
+
 function EXT.attachModuleGlow(btn)
+    btn.ClipsDescendants = true
+
     local glow = Instance.new("Frame", btn)
     glow.Name = "ModuleGlow"
     glow.Size = UDim2.new(1, 0, 1, 0)
@@ -5490,6 +6122,26 @@ function EXT.attachModuleGlow(btn)
     local layers = {glow = glow, gradient = gradient}
     table.insert(allLayers, layers)
     return layers
+end
+
+-- Страховка от залипания: курсор ушёл далеко, а MouseLeave не пришёл.
+-- Границы намеренно расширены - точка отсчёта AbsolutePosition и
+-- GetMouseLocation могут расходиться на высоту верхней панели Roblox,
+-- и жёсткая проверка гасила бы свечение прямо под курсором.
+local function cursorFarAway(btn)
+    if not (btn and btn.Parent) then return true end
+    local size = btn.AbsoluteSize
+    if size.X <= 0 or size.Y <= 0 then return false end
+
+    local m = G.UIS:GetMouseLocation()
+    local origin = btn.AbsolutePosition
+    local padX = 12
+    local padY = (EXT.guiInset or 0) + 12
+
+    return m.X < origin.X - padX
+        or m.X > origin.X + size.X + padX
+        or m.Y < origin.Y - padY
+        or m.Y > origin.Y + size.Y + padY
 end
 
 local function hideLayers(layers)
@@ -5522,7 +6174,22 @@ end
 
 function EXT.updateModuleGlow(dt)
     local s = getgenv().aim_settings
-    local active = hovered ~= nil and ScreenGui.Enabled and s.clickgui_module_glow
+
+    -- Меню закрыто: событий мыши больше не будет, поэтому сбрасываем
+    -- наведение принудительно. Иначе при следующем открытии подсветка
+    -- оживала бы на старом модуле, хотя курсор уже в другом месте.
+    if not ScreenGui.Enabled then
+        if hovered or hoverAmount > 0 then
+            for _, layers in ipairs(allLayers) do
+                hideLayers(layers)
+            end
+            hovered = nil
+            hoverAmount = 0
+        end
+        return
+    end
+
+    local active = hovered ~= nil and s.clickgui_module_glow
 
     hoverAmount = hoverAmount + ((active and 1 or 0) - hoverAmount) * math.clamp(dt * 12, 0, 1)
 
@@ -5531,6 +6198,14 @@ function EXT.updateModuleGlow(dt)
     local layers = hovered.layers
     if not (btn and btn.Parent and layers) then
         hovered = nil
+        return
+    end
+
+    -- Курсор ушёл далеко, а MouseLeave не пришёл - гасим сами
+    if cursorFarAway(btn) then
+        hideLayers(layers)
+        hovered = nil
+        hoverAmount = 0
         return
     end
 
@@ -6052,7 +6727,7 @@ pCombat:addSection(M.Aimbot, "Aim")
 pCombat:addDropdown(M.Aimbot, "Hitbox", "hitbox", {"Head", "Body"})
 pCombat:addDropdown(M.Aimbot, "Priority", "priority", {"Distance", "Health", "Free"})
 pCombat:addDropdown(M.Aimbot, "Activation", "aim_activation", {"RMB", "LMB", "Auto"})
-pCombat:addSlider(M.Aimbot, "FOV", "fov", 10, 500, 1)
+pCombat:addSlider(M.Aimbot, "FOV", "fov", 10, 500, 5)
 
 pCombat:addSection(M.Aimbot, "Target Filter")
 pCombat:addBoolean(M.Aimbot, "Lock Target", "lock_player")
@@ -6075,8 +6750,16 @@ pCombat:addSection(M.Aimbot, "Misc")
 pCombat:addBoolean(M.Aimbot, "Speed Display", "speed_display")
 
 M.Hitboxes = pCombat:addModule("Hitboxes", "hitboxes_enabled", true)
-pCombat:addDropdown(M.Hitboxes, "Part", "hitboxes_part", {"Head", "Body"})
+pCombat:addSection(M.Hitboxes, "Shape")
+pCombat:addDropdown(M.Hitboxes, "Part", "hitboxes_part", {"Head", "Body", "Both"})
 pCombat:addSlider(M.Hitboxes, "Size", "hitboxes_size", 1.0, 30.0, 0.5)
+
+pCombat:addSection(M.Hitboxes, "Filter")
+pCombat:addBoolean(M.Hitboxes, "Ignore Team", "hitboxes_ignore_team")
+pCombat:addSlider(M.Hitboxes, "Max Distance", "hitboxes_max_distance", 0, 1000, 25)
+
+pCombat:addSection(M.Hitboxes, "Visual")
+pCombat:addBoolean(M.Hitboxes, "Visualization", "hitboxes_visualization")
 pCombat:addSlider(M.Hitboxes, "Transparency", "hitboxes_transparency", 0.0, 1.0, 0.05)
 pCombat:addColorPicker(M.Hitboxes, "Color", "hitboxes_color")
 
@@ -6115,7 +6798,7 @@ pVisuals:addSlider(M.TargetESP, "Pulse Speed", "target_esp_pulse_speed", 0.5, 8,
 pVisuals:addModule("Target HUD", "target_hud", false)
 pVisuals:addModule("Friend Markers", "friend_markers", false)
     local mArrows = pVisuals:addModule("Arrows", "arrows", true)
-    pVisuals:addSlider(mArrows, "Radius", "arrows_radius", 20, 250, 1)
+    pVisuals:addSlider(mArrows, "Radius", "arrows_radius", 20, 250, 5)
     pVisuals:addSlider(mArrows, "Size", "arrows_size", 8, 48, 1)
 M.HUD = pVisuals:addModule("HUD", "hud_enabled", true)
 pVisuals:addSection(M.HUD, "Elements")
@@ -6162,6 +6845,7 @@ pVisuals:addColorPicker(M.JumpCircle, "Color", "jump_circle_color")
 M.ClickGui = pVisuals:addModule("ClickGui", "clickgui_enabled", true)
 pVisuals:addSection(M.ClickGui, "Animation")
 pVisuals:addDropdown(M.ClickGui, "Animation", "clickgui_animation", {"First", "Two"})
+pVisuals:addBoolean(M.ClickGui, "UI Animations", "clickgui_animations")
 
 pVisuals:addSection(M.ClickGui, "Hover")
 pVisuals:addBoolean(M.ClickGui, "Hover Outline", "clickgui_hover_outline")
@@ -6182,7 +6866,7 @@ pVisuals:addSlider(M.ClickGui, "Music Volume", "trollface_volume", 0, 1, 0.1)
 M.MouseGlow = pVisuals:addModule("Mouse Glow", "mouse_glow", true)
 pVisuals:addSection(M.MouseGlow, "Appearance")
 pVisuals:addDropdown(M.MouseGlow, "Style", "mouse_glow_style", {"Liquid Glass", "Neon"})
-pVisuals:addSlider(M.MouseGlow, "Size", "mouse_glow_size", 12, 120, 2)
+pVisuals:addSlider(M.MouseGlow, "Size", "mouse_glow_size", 12, 120, 5)
 pVisuals:addSlider(M.MouseGlow, "Dot Size", "mouse_glow_dot", 0, 16, 1)
 pVisuals:addSlider(M.MouseGlow, "Direction Stretch", "mouse_glow_stretch", 0, 2, 0.1)
 
@@ -6199,6 +6883,25 @@ pVisuals:addSection(M.Cosmetic, "China Hat")
 pVisuals:addBoolean(M.Cosmetic, "China Hat", "china_hat")
 pVisuals:addBoolean(M.Cosmetic, "Hide in First Person", "hide_in_first_person")
 pVisuals:addBoolean(M.Cosmetic, "Friends", "china_hat_friends")
+pVisuals:addBoolean(M.Cosmetic, "Rainbow", "china_hat_rainbow")
+pVisuals:addDropdown(M.Cosmetic, "Hat Material", "china_hat_material",
+    {"Glass", "Neon", "ForceField", "Plastic"})
+pVisuals:addSlider(M.Cosmetic, "Hat Float", "china_hat_float", 0, 1.5, 0.05)
+pVisuals:addSlider(M.Cosmetic, "Float Speed", "china_hat_float_speed", 0, 5, 0.1)
+pVisuals:addSlider(M.Cosmetic, "Hat Size", "china_hat_size", 0.5, 3, 0.1)
+pVisuals:addSlider(M.Cosmetic, "Hat Height", "china_hat_height", 0, 3, 0.1)
+pVisuals:addSlider(M.Cosmetic, "Spin Speed", "china_hat_speed", 0, 180, 5)
+pVisuals:addSlider(M.Cosmetic, "Hat Alpha", "china_hat_transparency", 0, 0.9, 0.05)
+
+pVisuals:addSection(M.Cosmetic, "Aura")
+pVisuals:addBoolean(M.Cosmetic, "Aura", "aura_enabled")
+pVisuals:addBoolean(M.Cosmetic, "Aura Rainbow", "aura_rainbow")
+pVisuals:addSlider(M.Cosmetic, "Aura Count", "aura_count", 1, 10, 1)
+pVisuals:addSlider(M.Cosmetic, "Aura Radius", "aura_radius", 1, 12, 0.5)
+pVisuals:addSlider(M.Cosmetic, "Aura Speed", "aura_speed", 0.2, 8, 0.2)
+pVisuals:addSlider(M.Cosmetic, "Aura Wave", "aura_wave", 0, 6, 0.25)
+pVisuals:addSlider(M.Cosmetic, "Aura Width", "aura_width", 0.05, 1, 0.05)
+pVisuals:addSlider(M.Cosmetic, "Aura Tail", "aura_trail_life", 0.1, 2, 0.1)
 
 pVisuals:addSection(M.Cosmetic, "Trails")
 pVisuals:addBoolean(M.Cosmetic, "Trails", "trails_enabled")
@@ -6225,21 +6928,21 @@ pMove:addBoolean(M.TargetStrafe, "PredictedPos", "target_strafe_predicted_pos")
 M.InfJump = pMove:addModule("Infinite Jump", "infinite_jump_enabled", true)
 pMove:addSection(M.InfJump, "Jump")
 pMove:addDropdown(M.InfJump, "Mode", "infinite_jump_mode", {"Default", "Platform"})
-pMove:addSlider(M.InfJump, "Jump Power", "infinite_jump_power", 10, 100, 1)
+pMove:addSlider(M.InfJump, "Jump Power", "infinite_jump_power", 10, 100, 5)
 
 pMove:addSection(M.InfJump, "Bypass")
 pMove:addBoolean(M.InfJump, "Bypass AntiCheat", "infinite_jump_bypass")
-pMove:addSlider(M.InfJump, "Fall Speed Limit", "infinite_jump_fall_limit", 40, 120, 1)
+pMove:addSlider(M.InfJump, "Fall Speed Limit", "infinite_jump_fall_limit", 40, 120, 5)
 M.Spider = pMove:addModule("Spider", "spider_enabled", true)
 pMove:addDropdown(M.Spider, "Mode", "spider_mode", {"Default", "Platform"})
 pMove:addBoolean(M.Spider, "Bypass", "spider_bypass")
-pMove:addSlider(M.Spider, "Fall Speed Limit", "spider_fall_limit", 40, 120, 1)
+pMove:addSlider(M.Spider, "Fall Speed Limit", "spider_fall_limit", 40, 120, 5)
 M.AirStuck = pMove:addModule("Air Stuck", "air_stuck_enabled", false)
 M.SmoothFall = pMove:addModule("Smooth Fall", "smooth_fall_enabled", false)
-pMove:addSlider(M.SmoothFall, "Fall Speed", "smooth_fall_speed", 10, 80, 1)
+pMove:addSlider(M.SmoothFall, "Fall Speed", "smooth_fall_speed", 10, 80, 5)
 pMove:addSlider(M.SmoothFall, "Smoothness", "smooth_fall_smoothness", 0.1, 1.0, 0.05)
 M.Speed = pMove:addModule("Speed", "speed_enabled", true)
-pMove:addSlider(M.Speed, "Speed", "speed_speed", 16, 60, 1)
+pMove:addSlider(M.Speed, "Speed", "speed_speed", 16, 60, 5)
 pMove:addBoolean(M.Speed, "Bypass", "speed_bypass")
 pMove:addSlider(M.Speed, "Jump Interval", "speed_jump_interval", 0.1, 1.0, 0.05)
 pMove:addModule("Safe Walk", "safe_walk_enabled", false)
@@ -6253,7 +6956,7 @@ pMove:addSection(M.Fly, "Bypass")
 pMove:addBoolean(M.Fly, "Bypass AntiCheat", "fly_bypass")
 pMove:addDropdown(M.Fly, "Bypass Mode", "fly_bypass_mode", {"Velocity", "Teleport", "Hybrid", "Jitter", "Smooth"})
 M.Clumsy = pMove:addModule("Clumsy", "clumsy_enabled", true)
-pMove:addSlider(M.Clumsy, "Speed", "clumsy_speed", 10, 100, 1)
+pMove:addSlider(M.Clumsy, "Speed", "clumsy_speed", 10, 100, 5)
 pMove:addBoolean(M.Clumsy, "Visualize", "clumsy_visualize")
 table.insert(State.panels, pMove)
 
@@ -7402,7 +8105,7 @@ State.connections.mainLoop = G.RS.RenderStepped:Connect(function()
     end
     
     if t - lastHitboxUpdate >= OPTIMIZATION.HITBOX_UPDATE_INTERVAL then
-        updateHitboxes()
+        EXT.updateHitboxes()
         lastHitboxUpdate = t
     end
 
@@ -8178,64 +8881,50 @@ State.connections.mainLoop = G.RS.RenderStepped:Connect(function()
 
         if signature ~= State.keybindSignature then
         State.keybindSignature = signature
-        -- Удаляем старые элементы
-        for _, item in pairs(State.keybindItems) do
-            if item then item:Destroy() end
-        end
-        State.keybindItems = {}
-        
+
+        -- Сверяем по именам: существующие строки остаются, новые въезжают,
+        -- снятые уезжают. Полная пересборка обрывала бы анимацию.
+        local present = {}
         local orderIndex = 3
-        -- Добавляем активные кейбинды
+
         for _, bindEntry in ipairs(bindEntries) do
             local keyCode = bindEntry.keyCode
             if keyCode ~= Enum.KeyCode.Unknown then
-                local item = Instance.new("Frame", KeybindList)
-                item.Size = UDim2.new(1, -16, 0, 20)
-                item.BackgroundTransparency = 1
+                present[bindEntry.name] = true
+
+                local item = State.keybindItems[bindEntry.name]
+                if not (item and item.Parent) then
+                    item = EXT.buildKeybindRow(bindEntry.name)
+                    State.keybindItems[bindEntry.name] = item
+                end
                 item.LayoutOrder = orderIndex
-                item.ZIndex = 100
                 orderIndex = orderIndex + 1
-                
-                local nameLbl = Instance.new("TextLabel", item)
-                nameLbl.Size = UDim2.new(0.6, 0, 1, 0)
-                nameLbl.Position = UDim2.new(0, 0, 0, 0)
-                nameLbl.BackgroundTransparency = 1
-                nameLbl.Text = bindEntry.name
-                nameLbl.TextColor3 = THEME.TEXT_DIM
-                nameLbl.Font = Enum.Font.Gotham
-                nameLbl.TextSize = 11
-                nameLbl.TextXAlignment = Enum.TextXAlignment.Left
-                nameLbl.ZIndex = 101
-                
-                local keyLbl = Instance.new("TextLabel", item)
-                keyLbl.Size = UDim2.new(0.4, 0, 1, 0)
-                keyLbl.Position = UDim2.new(0.6, 0, 0, 0)
-                keyLbl.BackgroundTransparency = 1
-                keyLbl.Text = "[" .. getKeyName(keyCode) .. (bindEntry.hold and " hold" or "") .. "]"
-                keyLbl.TextColor3 = getClientColor()
-                keyLbl.Font = Enum.Font.GothamBold
-                keyLbl.TextSize = 11
-                keyLbl.TextXAlignment = Enum.TextXAlignment.Right
-                keyLbl.ZIndex = 101
 
-                local stateLbl = Instance.new("TextLabel", item)
-                stateLbl.Size = UDim2.new(0, 34, 1, 0)
-                stateLbl.Position = UDim2.new(1, -70, 0, 0)
-                stateLbl.BackgroundTransparency = 1
-                stateLbl.Text = bindEntry.active and "ON" or "OFF"
-                stateLbl.TextColor3 = bindEntry.active and Color3.fromRGB(90, 210, 120) or THEME.TEXT_DIM
-                stateLbl.Font = Enum.Font.GothamBold
-                stateLbl.TextSize = 10
-                stateLbl.TextXAlignment = Enum.TextXAlignment.Right
-                stateLbl.ZIndex = 101
-
-                table.insert(State.keybindItems, item)
+                EXT.updateKeybindRow(item, bindEntry, keyCode)
             end
         end
-        
-        -- Обновляем размер панели
-        tw(KeybindList, {Size = UDim2.new(0, 180, 0, keybindLayout.AbsoluteContentSize.Y + 10)}, 0.2)
+
+        for name, item in pairs(State.keybindItems) do
+            if not present[name] then
+                EXT.retireKeybindRow(item)
+                State.keybindItems[name] = nil
+            end
         end
+
+        end
+
+        -- Высоту тянем каждый кадр. Разовый пересчёт при изменении списка
+        -- не годится: уезжающая строка исчезает позже, и панель осталась бы
+        -- с пустотой до следующего нажатия бинда.
+        local targetHeight = keybindLayout.AbsoluteContentSize.Y + 10
+        local currentHeight = KeybindList.Size.Y.Offset
+        KeybindList.Size = UDim2.new(0, 180, 0,
+            currentHeight + (targetHeight - currentHeight) * math.clamp(dt * 14, 0, 1))
+
+        -- Разделителю нечего делить, пока в списке нет строк
+        EXT.KeybindSplit.Visible = getgenv().aim_settings.hud_accents
+            and next(State.keybindItems) ~= nil
+
         lastKeybindUpdate = t
     end
     
@@ -8598,6 +9287,13 @@ State.connections.mainLoop = G.RS.RenderStepped:Connect(function()
     -- China Hat Logic
     if getgenv().aim_settings.cosmetic_enabled and getgenv().aim_settings.china_hat then
         State.chinaHatActive = true
+
+        -- Фаза копится сама. math.rad(tick() * speed) не годится: tick() уже
+        -- около 1.7e9, точность float съедает шаг и вращение идёт рывками.
+        State.chinaHatClock = State.chinaHatClock + dt
+        State.chinaHatPhase = (State.chinaHatPhase
+            + dt * (getgenv().aim_settings.china_hat_speed or 45)) % 360
+
         local player = G.LP
         if player.Character then
             local head = player.Character:FindFirstChild("Head")
@@ -8628,16 +9324,16 @@ State.connections.mainLoop = G.RS.RenderStepped:Connect(function()
                     end
                 end
                 
-                -- Создаем China Hat для локального игрока если его нет
-                if not State.chinaHat then
-                    local hatData = createChinaHat(player.Name, true)
-                    State.chinaHat = hatData.hat
-                    State.chinaHatLayers = hatData.layers
+                -- Создаем China Hat для локального игрока если его нет.
+                -- Держим набор целиком: пересборка таблицы из hat и layers
+                -- теряла меши и свет, и они переставали обновляться.
+                if not (State.chinaHat and State.chinaHatData) then
+                    State.chinaHatData = createChinaHat(player.Name, true)
+                    State.chinaHat = State.chinaHatData.hat
+                    State.chinaHatLayers = State.chinaHatData.layers
                 end
-                
-                -- Обновляем China Hat локального игрока
-                local localHatData = {hat = State.chinaHat, layers = State.chinaHatLayers}
-                updateChinaHatPosition(localHatData, head, shouldHide)
+
+                updateChinaHatPosition(State.chinaHatData, head, shouldHide)
             end
         end
         
@@ -8677,6 +9373,8 @@ State.connections.mainLoop = G.RS.RenderStepped:Connect(function()
         end
     end
     
+    EXT.updateAura(dt)
+
     -- Trails Logic
     if getgenv().aim_settings.cosmetic_enabled and getgenv().aim_settings.trails_enabled then
         local character = G.LP.Character
@@ -9252,6 +9950,7 @@ State.connections.mainLoop = G.RS.RenderStepped:Connect(function()
         getgenv().aim_settings.cosmetic_enabled = false
         getgenv().aim_settings.china_hat = false
         getgenv().aim_settings.china_hat_friends = false
+        getgenv().aim_settings.aura_enabled = false
         getgenv().aim_settings.trails_enabled = false
         getgenv().aim_settings.tp_walk_enabled = false
         getgenv().aim_settings.target_strafe_enabled = false
@@ -9383,6 +10082,7 @@ State.connections.mainLoop = G.RS.RenderStepped:Connect(function()
             State.chinaHat:Destroy()
             State.chinaHat = nil
         end
+        State.chinaHatData = nil
         
         for _, layer in ipairs(State.chinaHatLayers) do
             if layer then
@@ -9403,6 +10103,9 @@ State.connections.mainLoop = G.RS.RenderStepped:Connect(function()
         end
         lastCameraMode = nil
         
+        -- Очищаем ауру
+        EXT.clearAura()
+
         -- Очищаем Trails
         if State.trails.trail then
             State.trails.trail:Destroy()
