@@ -39,7 +39,8 @@ getgenv().aim_settings = {
     rainbow_crosshair = false,
     prediction_enabled = false,
     prediction_amount = 0.13,
-    auto_predict = false,          -- предикт считается от скорости цели и пинга
+    prediction_mode = "Ping",      -- "Ping" / "Auto" / "Manual"
+    ping_multiplier = 1,           -- множитель к сетевой задержке
     auto_predict_strength = 1,
     smooth_enabled = false,
     smooth_amount = 0.1,
@@ -165,6 +166,7 @@ getgenv().aim_settings = {
     hitboxes_enabled = false,
     hitboxes_visualization = true,  -- false = хитбокс растёт, но выглядит как обычно
     hitboxes_part = "Head",         -- "Head" / "Body" / "Both"
+    hitboxes_shape = "Ball",        -- форма самого хитбокса
     hitboxes_size = 15.0,
     hitboxes_transparency = 0.7,
     hitboxes_color = Color3.fromRGB(0, 170, 255),
@@ -179,6 +181,16 @@ getgenv().aim_settings = {
     config_name = "",
     -- Aimbot activation settings
     aim_activation = "RMB", -- "RMB", "LMB", "Auto"
+    -- Orbit: облёт цели по кругу
+    orbit_enabled = false,
+    orbit_activation = "Free",  -- "Free" / "RMB" / "LMB"
+    orbit_speed = 3,            -- радиан в секунду
+    orbit_radius = 8,           -- радиус круга, студы
+    orbit_height = 0,           -- смещение по высоте относительно цели
+    orbit_max_distance = 80,    -- дальше цель не берём
+    orbit_fov = 250,            -- радиус захвата прицелом, пиксели
+    orbit_prediction = true,      -- упреждение во время облёта
+    orbit_auto_prediction = false, -- считать по Auto, а не режимом аимбота
     -- TP Walk settings
     tp_walk_enabled = false,
     tp_walk_speed = 5,
@@ -261,6 +273,7 @@ local State = {
     chinaHatPhase = 0,    -- накопленный угол вращения, градусы
     chinaHatClock = 0,    -- своё время анимации, секунды
     auraClock = 0,
+    orbit = {active = false, angle = 0, player = nil, part = nil},
     lastCameraMode = nil,
     friendsHats = {},
     viewmodel = {
@@ -2618,6 +2631,7 @@ local MODULE_NAMES = {
     hitboxes_enabled = "Hitboxes",
     tp_walk_enabled = "TP Walk",
     target_strafe_enabled = "Target Strafe",
+    orbit_enabled = "Orbit",
     infinite_jump_enabled = "Infinite Jump",
     freecam_enabled = "Freecam"
 }
@@ -2799,6 +2813,10 @@ local function getClosest()
     return target
 end
 
+-- Data Ping - это полный оборот пакета до сервера и обратно, в миллисекундах.
+-- Ровно на это время наша картинка отстаёт от того, что видит сервер, поэтому
+-- оно и есть базовое упреждение. Потолок в 250 мс страхует от выбросов: при
+-- разрыве связи значение улетает в тысячи и прицел уводило бы за горизонт.
 local function getPingSeconds()
     local ok, pingValue = pcall(function()
         return game:GetService("Stats").Network.ServerStatsItem["Data Ping"]:GetValue()
@@ -2806,28 +2824,41 @@ local function getPingSeconds()
     if not ok then
         return 0
     end
-    return math.clamp(math.max(0, pingValue) / 1000, 0, 0.18)
+    return math.clamp(math.max(0, pingValue) / 1000, 0, 0.25)
 end
 
-local function getPredictedPosition(part)
+-- modeOverride позволяет считать чужим режимом: Orbit держит собственный
+-- переключатель и не должен зависеть от того, что выбрано в аимботе.
+local function getPredictedPosition(part, modeOverride)
     if not part or not part.Parent then 
         return part and part.Position or Vector3.new(0, 0, 0)
     end
     
-    -- Проверяем что часть все еще существует и имеет Velocity
-    local success, velocity = pcall(function() return part.Velocity end)
-    if not success then
+    -- AssemblyLinearVelocity - скорость всей сборки персонажа. У отдельной
+    -- детали Velocity может быть нулевой, пока её тащит сустав, и упреждение
+    -- тогда молча обнулялось.
+    local success, velocity = pcall(function()
+        return part.AssemblyLinearVelocity or part.Velocity
+    end)
+    if not success or not velocity then
         return part.Position
     end
-    
+
     local s = getgenv().aim_settings
     local horizontalVelocity = Vector3.new(velocity.X, 0, velocity.Z)
     local speed = horizontalVelocity.Magnitude
+    local mode = modeOverride or s.prediction_mode or "Ping"
 
     local prediction
-    if s.auto_predict then
-        -- Auto Predict: упреждение считается само - из задержки сети и
-        -- скорости цели. Ползунок Predict Amount при этом не участвует.
+    if mode == "Ping" then
+        -- Пока пакет идёт до сервера и обратно, цель успевает пройти
+        -- velocity * ping. Целимся туда, где она окажется, а не туда, где мы
+        -- её видим. Множитель нужен потому, что разные игры компенсируют
+        -- задержку по-своему и «честного» пинга иногда мало.
+        prediction = getPingSeconds() * (s.ping_multiplier or 1)
+    elseif mode == "Auto" then
+        -- К задержке добавляется поправка на скорость: чем быстрее цель,
+        -- тем сильнее на упреждение влияет сглаживание её движения.
         prediction = (getPingSeconds() + math.clamp(speed / 220, 0, 0.22))
             * (s.auto_predict_strength or 1)
     else
@@ -2845,7 +2876,7 @@ local function getPredictedPosition(part)
         if state == Enum.HumanoidStateType.Freefall then
             -- В падении цель разгоняется вниз. В авторежиме поправка мягче:
             -- вертикальная скорость уже учтена в самом векторе velocity.
-            prediction = prediction * (s.auto_predict and 1.6 or 3)
+            prediction = prediction * ((mode == "Manual") and 3 or 1.6)
         elseif state == Enum.HumanoidStateType.Jumping then
             prediction = prediction * 1.5
         end
@@ -3173,6 +3204,139 @@ local function updateTargetStrafe(deltaTime)
     rootPart.CFrame = CFrame.new(nextPosition, lookAt)
 end
 
+-- ============================================================================
+-- [[ ORBIT ]] Облёт цели по кругу.
+-- Цель не вводится руками, как в Target Strafe, а ловится прицелом: берётся
+-- тот, кто ближе всего к наводке на экране. Пойманная цель держится, пока
+-- жива и в пределах дальности.
+-- ============================================================================
+do
+
+local function isValidTarget(s, player, myPos)
+    if not player or player == G.LP then return false end
+
+    local character = player.Character
+    if not character then return false end
+    if isFriend(player.Name) then return false end
+    if s.ignore_team and player.Team ~= nil and player.Team == G.LP.Team then
+        return false
+    end
+
+    local humanoid = character:FindFirstChildOfClass("Humanoid")
+    local root = character:FindFirstChild("HumanoidRootPart")
+    if not (humanoid and root and humanoid.Health > 0) then return false end
+
+    return (root.Position - myPos).Magnitude <= (s.orbit_max_distance or 80)
+end
+
+local function pickTarget(s, myPos)
+    local best, bestScreenDistance = nil, (s.orbit_fov or 250)
+
+    -- WorldToViewportPoint отдаёт координаты без верхней панели Roblox, а
+    -- GetMouseLocation - вместе с ней. EXT.mousePosition снимает эту разницу,
+    -- иначе круг захвата был бы смещён вниз на высоту панели.
+    local cursor = EXT.mousePosition(false)
+
+    for _, player in ipairs(G.Plr:GetPlayers()) do
+        if isValidTarget(s, player, myPos) then
+            local part = player.Character:FindFirstChild("Head")
+                or player.Character:FindFirstChild("HumanoidRootPart")
+
+            if part then
+                local screenPos, onScreen = G.Cam:WorldToViewportPoint(part.Position)
+                if onScreen and screenPos.Z > 0 then
+                    local distance =
+                        (Vector2.new(screenPos.X, screenPos.Y) - cursor).Magnitude
+                    if distance < bestScreenDistance then
+                        best, bestScreenDistance = player, distance
+                    end
+                end
+            end
+        end
+    end
+
+    return best
+end
+
+local function stopOrbit(humanoid)
+    local orbit = State.orbit
+    if orbit.active and humanoid then
+        humanoid.AutoRotate = true
+    end
+    orbit.active = false
+    orbit.player = nil
+    orbit.part = nil
+end
+
+function EXT.updateOrbit(deltaTime)
+    local s = getgenv().aim_settings
+    local orbit = State.orbit
+
+    local character = G.LP.Character
+    local humanoid = character and character:FindFirstChildOfClass("Humanoid")
+    local root = character and character:FindFirstChild("HumanoidRootPart")
+
+    -- Режим удержания: Free крутит сразу, RMB и LMB - пока кнопка зажата
+    local wanted = s.orbit_enabled
+    if wanted then
+        local mode = s.orbit_activation or "Free"
+        if mode == "RMB" then
+            wanted = G.UIS:IsMouseButtonPressed(Enum.UserInputType.MouseButton2)
+        elseif mode == "LMB" then
+            wanted = G.UIS:IsMouseButtonPressed(Enum.UserInputType.MouseButton1)
+        end
+    end
+
+    if not (wanted and humanoid and root and humanoid.Health > 0) then
+        stopOrbit(humanoid)
+        return
+    end
+
+    -- Пойманную цель держим: без этого при облёте она перескакивала бы на
+    -- каждого, кто попал под прицел по дороге.
+    local target = orbit.player
+    if not isValidTarget(s, target, root.Position) then
+        target = pickTarget(s, root.Position)
+    end
+
+    if not target then
+        stopOrbit(humanoid)
+        return
+    end
+
+    local targetRoot = target.Character:FindFirstChild("HumanoidRootPart")
+    if not targetRoot then
+        stopOrbit(humanoid)
+        return
+    end
+
+    -- Смена цели начинает круг заново, иначе персонаж рывком перелетает
+    -- в точку, где он был на прежней орбите.
+    if orbit.player ~= target then
+        orbit.player = target
+        orbit.angle = 0
+    end
+
+    orbit.active = true
+    orbit.part = target.Character:FindFirstChild("Head") or targetRoot
+    orbit.angle = (orbit.angle + (s.orbit_speed or 3) * deltaTime) % (math.pi * 2)
+
+    local radius = math.max(s.orbit_radius or 8, 1)
+    local center = targetRoot.Position
+    local desired = Vector3.new(
+        center.X + math.cos(orbit.angle) * radius,
+        center.Y + (s.orbit_height or 0),
+        center.Z + math.sin(orbit.angle) * radius
+    )
+
+    -- Смотрим в цель и отключаем доворот Humanoid: иначе он спорит с нами
+    -- за поворот и персонажа трясёт.
+    humanoid.AutoRotate = false
+    root.CFrame = CFrame.new(desired, Vector3.new(center.X, desired.Y, center.Z))
+end
+
+end
+
 -- [[ TP WALK FUNCTION ]]
 local tpwalkConnection = nil
 
@@ -3246,6 +3410,16 @@ function updateAimbotCamera()
         end
     end
 
+    -- В режиме Free наводку ведёт сам Orbit: кнопка не удерживается, значит
+    -- обычная активация аимбота не сработала бы. В режимах RMB и LMB кнопка
+    -- уже зажата, аимбот включается своим обычным путём, и вмешиваться незачем.
+    local orbitAim = State.orbit.active
+        and (getgenv().aim_settings.orbit_activation or "Free") == "Free"
+        and State.orbit.part ~= nil
+    if orbitAim then
+        shouldAim = true
+    end
+
     if not shouldAim then
         State.LockedTarget = nil
         State.lastAimbotCFrame = nil
@@ -3263,7 +3437,9 @@ function updateAimbotCamera()
         return true
     end
 
-    if getgenv().aim_settings.lock_player then
+    if orbitAim and isTargetValid(State.orbit.part) then
+        State.LockedTarget = State.orbit.part
+    elseif getgenv().aim_settings.lock_player then
         if not isTargetValid(State.LockedTarget) then
             State.LockedTarget = getClosest()
         end
@@ -3281,9 +3457,20 @@ function updateAimbotCamera()
         return
     end
 
-    local usePrediction = getgenv().aim_settings.prediction_enabled
-        or getgenv().aim_settings.auto_predict
-    local targetPos = usePrediction and getPredictedPosition(State.LockedTarget)
+    -- У Orbit своё упреждение: на орбите цель почти постоянно идёт вбок
+    -- относительно нас, и настройки дальней перестрелки там не подходят.
+    local usePrediction, predictionMode
+    if orbitAim then
+        usePrediction = getgenv().aim_settings.orbit_prediction
+        if getgenv().aim_settings.orbit_auto_prediction then
+            predictionMode = "Auto"
+        end
+    else
+        usePrediction = getgenv().aim_settings.prediction_enabled
+    end
+
+    local targetPos = usePrediction
+        and getPredictedPosition(State.LockedTarget, predictionMode)
         or State.LockedTarget.Position
 
     if getgenv().aim_settings.noise_enabled then
@@ -3316,92 +3503,77 @@ end
 
 -- ============================================================================
 -- [[ HITBOXES ]] Расширение хитбоксов игроков.
--- Детали не пересоздаются, а меняются на месте, поэтому оригинальные свойства
--- обязательно запоминаются. Сброс на "стандартные" значения ломал нестандартные
--- модели: у R6, R15 и кастомных аватаров размеры головы и корпуса разные.
+-- Хитбокс - ОТДЕЛЬНАЯ деталь поверх цели, а не раздутая деталь персонажа.
+-- Менять размер настоящих деталей нельзя: у Motor6D смещения суставов
+-- считаются от размеров, поэтому раздутый HumanoidRootPart ломал скелет -
+-- игроки застывали на месте. Своя деталь ничего не ломает и убирается
+-- одним Destroy, без запоминания и восстановления исходных свойств.
 -- ============================================================================
 do
 
--- part -> оригинальные свойства. Ключ - сама деталь: при респавне персонажа
--- запись отваливается вместе с моделью, живых ссылок на мусор не остаётся.
-local touched = {}
+-- цель (деталь персонажа) -> наш хитбокс
+local boxes = {}
 
-local HITBOX_PARTS = {
+-- Голова есть в каждом режиме: по ней считается попадание в большинстве игр,
+-- и терять её при переключении на корпус смысла нет. Режим задаёт лишь то,
+-- что добавляется сверху. UpperTorso и Torso перечислены оба - у персонажа
+-- есть только один из них (R15 и R6), лишнее имя просто не находится.
+local HITBOX_TARGETS = {
     Head = {"Head"},
-    Body = {"HumanoidRootPart"},
-    Both = {"Head", "HumanoidRootPart"}
+    Body = {"Head", "HumanoidRootPart"},
+    Both = {"Head", "HumanoidRootPart", "UpperTorso", "Torso"}
 }
 
-local function capture(part)
-    local original = touched[part]
-    if original then return original end
-    original = {
-        size = part.Size,
-        transparency = part.Transparency,
-        color = part.Color,
-        material = part.Material,
-        canCollide = part.CanCollide,
-        canTouch = part.CanTouch,
-        canQuery = part.CanQuery,
-        massless = part.Massless
-    }
-    touched[part] = original
-    return original
-end
+-- Шар у сферической детали строится по наименьшей стороне, поэтому размер
+-- всегда задаётся одинаковым по всем осям.
+local HITBOX_SHAPES = {
+    Ball = Enum.PartType.Ball,
+    Block = Enum.PartType.Block
+}
 
--- Пишем только изменившееся: свойства деталей реплицируются, а обновление идёт
--- каждый кадр - слепая перезапись давала бы лишний трафик и просадку fps.
-local function setProp(part, prop, value)
-    if part[prop] ~= value then
-        part[prop] = value
+local function destroyBox(target)
+    local box = boxes[target]
+    boxes[target] = nil
+    if box then
+        pcall(function() box:Destroy() end)
     end
 end
 
-local function restore(part)
-    local original = touched[part]
-    if not original then return end
-    touched[part] = nil
-    if not part.Parent then return end
-    pcall(function()
-        setProp(part, "Size", original.size)
-        setProp(part, "Transparency", original.transparency)
-        setProp(part, "Color", original.color)
-        setProp(part, "Material", original.material)
-        setProp(part, "CanCollide", original.canCollide)
-        setProp(part, "CanTouch", original.canTouch)
-        setProp(part, "CanQuery", original.canQuery)
-        setProp(part, "Massless", original.massless)
-    end)
-end
-
-local function restoreAll()
-    for part in pairs(touched) do
-        restore(part)
+local function clearAll()
+    for target in pairs(boxes) do
+        destroyBox(target)
     end
-    touched = {}
+    boxes = {}
 end
+EXT.clearHitboxes = clearAll
 
-local function applyPart(part, s, size)
-    local original = capture(part)
+local function ensureBox(target)
+    local box = boxes[target]
+    if box and box.Parent then return box end
 
-    setProp(part, "Size", Vector3.new(size, size, size))
-    -- Раздутая деталь не должна толкать игроков и мешать физике
-    setProp(part, "CanCollide", false)
-    setProp(part, "Massless", true)
-    -- Попадание считается по Touch и по лучу, поэтому нужно и то, и другое
-    setProp(part, "CanTouch", true)
-    setProp(part, "CanQuery", true)
+    box = Instance.new("Part")
+    box.Name = "MoonwareHitbox"
+    box.Shape = HITBOX_SHAPES[getgenv().aim_settings.hitboxes_shape]
+        or Enum.PartType.Ball
+    box.Material = Enum.Material.Neon
+    box.Transparency = 1
+    box.Size = Vector3.new(1, 1, 1)
+    box.CFrame = target.CFrame
+    -- Деталь якорная, положение задаём сами каждый кадр: сварка отдала бы её
+    -- физике и сетевому владельцу, а это лишний источник рассинхрона.
+    box.Anchored = true
+    box.CanCollide = false
+    box.Massless = true
+    -- Попадание считают и по касанию, и по лучу - нужно и то, и другое
+    box.CanTouch = true
+    box.CanQuery = true
+    box.CastShadow = false
+    box.Locked = true
+    -- Внутрь модели персонажа: проверки игры обычно смотрят именно там
+    box.Parent = target.Parent
 
-    if s.hitboxes_visualization then
-        setProp(part, "Transparency", s.hitboxes_transparency)
-        setProp(part, "Color", s.hitboxes_color)
-        setProp(part, "Material", Enum.Material.Neon)
-    else
-        -- Визуализация выключена: деталь выглядит ровно как была
-        setProp(part, "Transparency", original.transparency)
-        setProp(part, "Color", original.color)
-        setProp(part, "Material", original.material)
-    end
+    boxes[target] = box
+    return box
 end
 
 local function shouldAffect(player, s, myPos)
@@ -3413,7 +3585,6 @@ local function shouldAffect(player, s, myPos)
         return false
     end
 
-    -- Труп трогать незачем, а после респавна деталь будет уже другая
     local humanoid = player.Character:FindFirstChildOfClass("Humanoid")
     if not humanoid or humanoid.Health <= 0 then return false end
 
@@ -3434,7 +3605,7 @@ function EXT.updateHitboxes()
 
     if not s.hitboxes_enabled then
         if State.hitboxesActive then
-            restoreAll()
+            clearAll()
             State.hitboxesActive = false
         end
         return
@@ -3442,7 +3613,7 @@ function EXT.updateHitboxes()
 
     State.hitboxesActive = true
 
-    local names = HITBOX_PARTS[s.hitboxes_part] or HITBOX_PARTS.Head
+    local names = HITBOX_TARGETS[s.hitboxes_part] or HITBOX_TARGETS.Head
     local size = math.max(s.hitboxes_size or 1, 0.1)
     local myRoot = G.LP.Character and G.LP.Character:FindFirstChild("HumanoidRootPart")
     local myPos = myRoot and myRoot.Position or nil
@@ -3451,21 +3622,34 @@ function EXT.updateHitboxes()
     for _, player in ipairs(G.Plr:GetPlayers()) do
         if shouldAffect(player, s, myPos) then
             for _, name in ipairs(names) do
-                local part = player.Character:FindFirstChild(name)
-                if part and part:IsA("BasePart") then
-                    keep[part] = true
-                    pcall(applyPart, part, s, size)
+                local target = player.Character:FindFirstChild(name)
+                if target and target:IsA("BasePart") then
+                    keep[target] = true
+                    pcall(function()
+                        local box = ensureBox(target)
+                        -- Форму применяем каждый кадр, иначе смена в меню
+                        -- подхватилась бы только после пересоздания хитбокса
+                        box.Shape = HITBOX_SHAPES[s.hitboxes_shape] or Enum.PartType.Ball
+                        box.Size = Vector3.new(size, size, size)
+                        box.CFrame = target.CFrame
+                        if s.hitboxes_visualization then
+                            box.Transparency = s.hitboxes_transparency
+                            box.Color = s.hitboxes_color
+                        else
+                            box.Transparency = 1
+                        end
+                    end)
                 end
             end
         end
     end
 
     -- Смена детали, выход игрока, добавление в друзья, уход за дистанцию,
-    -- смерть, респавн - все случаи сходятся сюда: деталь больше не в списке,
-    -- значит её нужно вернуть в исходное состояние.
-    for part in pairs(touched) do
-        if not keep[part] then
-            restore(part)
+    -- смерть, респавн - все случаи сходятся сюда: цель больше не в списке,
+    -- значит её хитбокс лишний.
+    for target in pairs(boxes) do
+        if not keep[target] then
+            destroyBox(target)
         end
     end
 end
@@ -5246,7 +5430,8 @@ EXT.PANIC_KEYS = {
     "friend_markers", "arrows", "rainbow_fov", "rainbow_crosshair", "jump_circle_enabled",
     "cosmetic_enabled", "china_hat", "china_hat_friends", "aura_enabled",
     "trails_enabled",
-    "tp_walk_enabled", "target_strafe_enabled", "infinite_jump_enabled", "spider_enabled",
+    "tp_walk_enabled", "target_strafe_enabled", "orbit_enabled",
+    "infinite_jump_enabled", "spider_enabled",
     "air_stuck_enabled", "smooth_fall_enabled", "speed_enabled", "safe_walk_enabled",
     "fly_enabled", "clumsy_enabled", "freecam_enabled", "noclip_enabled", "anti_fling",
     "fullbright", "always_day", "world_tweaks_enabled", "hitboxes_enabled",
@@ -6736,9 +6921,10 @@ pCombat:addBoolean(M.Aimbot, "Ignore Team", "ignore_team")
 
 pCombat:addSection(M.Aimbot, "Prediction")
 pCombat:addBoolean(M.Aimbot, "Prediction", "prediction_enabled")
+pCombat:addDropdown(M.Aimbot, "Prediction Mode", "prediction_mode", {"Ping", "Auto", "Manual"})
+pCombat:addSlider(M.Aimbot, "Ping Multiplier", "ping_multiplier", 0.2, 3, 0.1)
+pCombat:addSlider(M.Aimbot, "Auto Strength", "auto_predict_strength", 0.2, 3, 0.1)
 pCombat:addSlider(M.Aimbot, "Predict Amount", "prediction_amount", 0, 0.5, 0.01)
-pCombat:addBoolean(M.Aimbot, "Auto Predict", "auto_predict")
-pCombat:addSlider(M.Aimbot, "Auto Predict Strength", "auto_predict_strength", 0.2, 3, 0.1)
 
 pCombat:addSection(M.Aimbot, "Aim Assist")
 pCombat:addBoolean(M.Aimbot, "Smooth", "smooth_enabled")
@@ -6749,9 +6935,20 @@ pCombat:addSlider(M.Aimbot, "Noise Amount", "noise_amount", 0, 0.5, 0.01)
 pCombat:addSection(M.Aimbot, "Misc")
 pCombat:addBoolean(M.Aimbot, "Speed Display", "speed_display")
 
+M.Orbit = pCombat:addModule("Orbit", "orbit_enabled", true)
+pCombat:addDropdown(M.Orbit, "Activation", "orbit_activation", {"Free", "RMB", "LMB"})
+pCombat:addSlider(M.Orbit, "Speed", "orbit_speed", 0.5, 12, 0.5)
+pCombat:addSlider(M.Orbit, "Radius", "orbit_radius", 2, 30, 0.5)
+pCombat:addSlider(M.Orbit, "Height", "orbit_height", -10, 10, 0.5)
+pCombat:addSlider(M.Orbit, "Max Distance", "orbit_max_distance", 10, 300, 5)
+pCombat:addSlider(M.Orbit, "Catch FOV", "orbit_fov", 30, 800, 10)
+pCombat:addBoolean(M.Orbit, "Prediction", "orbit_prediction")
+pCombat:addBoolean(M.Orbit, "Auto Prediction", "orbit_auto_prediction")
+
 M.Hitboxes = pCombat:addModule("Hitboxes", "hitboxes_enabled", true)
 pCombat:addSection(M.Hitboxes, "Shape")
 pCombat:addDropdown(M.Hitboxes, "Part", "hitboxes_part", {"Head", "Body", "Both"})
+pCombat:addDropdown(M.Hitboxes, "Shape", "hitboxes_shape", {"Ball", "Block"})
 pCombat:addSlider(M.Hitboxes, "Size", "hitboxes_size", 1.0, 30.0, 0.5)
 
 pCombat:addSection(M.Hitboxes, "Filter")
@@ -8034,12 +8231,20 @@ if not getgenv().freecam_data then
     getgenv().freecam_data = {cframe = nil, original_type = nil, char_anchored = false}
 end
 
-State.connections.freecam = G.RS.RenderStepped:Connect(function()
+State.connections.freecam = G.RS.RenderStepped:Connect(function(dt)
     local fc = getgenv().freecam_data
-    if not getgenv().aim_settings.freecam_enabled then
+    local s = getgenv().aim_settings
+
+    if not s.freecam_enabled then
         if fc.original_type then
             G.Cam.CameraType = fc.original_type
             fc.original_type = nil
+        end
+        -- Возвращаем курсор
+        if fc.mouse_locked then
+            G.UIS.MouseBehavior = Enum.MouseBehavior.Default
+            G.UIS.MouseIconEnabled = true
+            fc.mouse_locked = false
         end
         -- Разблокируем персонажа
         if fc.char_anchored and G.LP.Character and G.LP.Character:FindFirstChild("HumanoidRootPart") then
@@ -8049,44 +8254,73 @@ State.connections.freecam = G.RS.RenderStepped:Connect(function()
         fc.cframe = nil
         return
     end
-    
-    if not fc.original_type then
-        fc.original_type = G.Cam.CameraType
+
+    -- freecam_data лежит в getgenv и переживает перезапуск скрипта. Проверяем
+    -- и cframe тоже: если прошлый запуск оборвали на включённом фрикаме,
+    -- original_type оставался заполненным, инициализация пропускалась, и
+    -- камера так и оставалась под управлением стандартного скрипта Roblox.
+    if not fc.original_type or not fc.cframe then
+        fc.original_type = fc.original_type or G.Cam.CameraType
         -- Scriptable, иначе стандартный скрипт камеры Roblox продолжает
         -- писать CFrame каждый кадр и фрикам дёргается.
         G.Cam.CameraType = Enum.CameraType.Scriptable
         fc.cframe = G.Cam.CFrame
     end
-    
+
+    -- GetMouseDelta отдаёт ноль, пока курсор не захвачен. Без этого камера
+    -- вообще не поворачивалась - мышь двигалась, а дельта приходила нулевая.
+    -- При открытом меню курсор нужен обычный, поэтому захват там снимаем.
+    local wantLock = not ScreenGui.Enabled
+    if wantLock ~= fc.mouse_locked then
+        fc.mouse_locked = wantLock
+        G.UIS.MouseBehavior = wantLock and Enum.MouseBehavior.LockCenter
+            or Enum.MouseBehavior.Default
+        G.UIS.MouseIconEnabled = not wantLock
+    end
+
     -- Блокируем персонажа
     if G.LP.Character and G.LP.Character:FindFirstChild("HumanoidRootPart") then
         G.LP.Character.HumanoidRootPart.Anchored = true
         fc.char_anchored = true
     end
-    
-    local s = getgenv().aim_settings.freecam_speed
-    local m = Vector3.new(0,0,0)
-    
-    if G.UIS:IsKeyDown(Enum.KeyCode.W) then m=m+fc.cframe.LookVector*s end
-    if G.UIS:IsKeyDown(Enum.KeyCode.S) then m=m-fc.cframe.LookVector*s end
-    if G.UIS:IsKeyDown(Enum.KeyCode.A) then m=m-fc.cframe.RightVector*s end
-    if G.UIS:IsKeyDown(Enum.KeyCode.D) then m=m+fc.cframe.RightVector*s end
-    if G.UIS:IsKeyDown(Enum.KeyCode.Space) then m=m+Vector3.new(0,s,0) end
-    if G.UIS:IsKeyDown(Enum.KeyCode.LeftShift) then m=m-Vector3.new(0,s,0) end
-    
-    fc.cframe = fc.cframe + m
-    local d = G.UIS:GetMouseDelta()
-    
-    -- Убираем roll (переворачивание), оставляем только pitch (вверх-вниз) и yaw (влево-вправо)
-    local lookVector = fc.cframe.LookVector
-    local rightVector = fc.cframe.RightVector
-    
-    -- Поворот по вертикали (pitch)
-    fc.cframe = fc.cframe * CFrame.Angles(-d.Y*0.003, 0, 0)
-    
-    -- Поворот по горизонтали (yaw) - всегда относительно мировой оси Y
-    fc.cframe = CFrame.new(fc.cframe.Position) * CFrame.Angles(0, -d.X*0.003, 0) * (fc.cframe - fc.cframe.Position)
-    
+
+    -- Скорость в студах в секунду. Раньше сдвиг был на кадр, и на 200 fps
+    -- камера летела втрое быстрее, чем на 60.
+    local step = (s.freecam_speed or 1) * 60 * math.min(dt, 0.1)
+    local move = Vector3.new(0, 0, 0)
+
+    -- Пока курсор в поле ввода, WASD набирает текст, а не летит
+    if not G.UIS:GetFocusedTextBox() then
+        if G.UIS:IsKeyDown(Enum.KeyCode.W) then move = move + fc.cframe.LookVector end
+        if G.UIS:IsKeyDown(Enum.KeyCode.S) then move = move - fc.cframe.LookVector end
+        if G.UIS:IsKeyDown(Enum.KeyCode.A) then move = move - fc.cframe.RightVector end
+        if G.UIS:IsKeyDown(Enum.KeyCode.D) then move = move + fc.cframe.RightVector end
+        if G.UIS:IsKeyDown(Enum.KeyCode.Space) then move = move + Vector3.new(0, 1, 0) end
+        if G.UIS:IsKeyDown(Enum.KeyCode.LeftShift) then move = move - Vector3.new(0, 1, 0) end
+    end
+
+    if move.Magnitude > 0 then
+        fc.cframe = fc.cframe + move.Unit * step
+    end
+
+    if fc.mouse_locked then
+        local d = G.UIS:GetMouseDelta()
+        if d.X ~= 0 or d.Y ~= 0 then
+            -- Углы пересобираем заново из направления взгляда: так крена не
+            -- появляется вообще, а тангаж можно честно ограничить, чтобы
+            -- камера не переворачивалась через зенит.
+            local look = fc.cframe.LookVector
+            local pitch = math.clamp(
+                math.asin(math.clamp(look.Y, -1, 1)) - d.Y * 0.003,
+                math.rad(-89), math.rad(89))
+            local yaw = math.atan2(-look.X, -look.Z) - d.X * 0.003
+
+            fc.cframe = CFrame.new(fc.cframe.Position)
+                * CFrame.Angles(0, yaw, 0)
+                * CFrame.Angles(pitch, 0, 0)
+        end
+    end
+
     G.Cam.CFrame = fc.cframe
 end)
 
@@ -9954,6 +10188,7 @@ State.connections.mainLoop = G.RS.RenderStepped:Connect(function()
         getgenv().aim_settings.trails_enabled = false
         getgenv().aim_settings.tp_walk_enabled = false
         getgenv().aim_settings.target_strafe_enabled = false
+        getgenv().aim_settings.orbit_enabled = false
         getgenv().aim_settings.target_strafe_predicted_pos = false
         getgenv().aim_settings.infinite_jump_enabled = false
         getgenv().aim_settings.spider_enabled = false
@@ -10000,6 +10235,11 @@ State.connections.mainLoop = G.RS.RenderStepped:Connect(function()
         if fc.original_type then
             G.Cam.CameraType = fc.original_type
             fc.original_type = nil
+        end
+        if fc.mouse_locked then
+            G.UIS.MouseBehavior = Enum.MouseBehavior.Default
+            G.UIS.MouseIconEnabled = true
+            fc.mouse_locked = false
         end
         if fc.char_anchored and G.LP.Character and G.LP.Character:FindFirstChild("HumanoidRootPart") then
             G.LP.Character.HumanoidRootPart.Anchored = false
@@ -10103,8 +10343,9 @@ State.connections.mainLoop = G.RS.RenderStepped:Connect(function()
         end
         lastCameraMode = nil
         
-        -- Очищаем ауру
+        -- Очищаем ауру и хитбоксы
         EXT.clearAura()
+        EXT.clearHitboxes()
 
         -- Очищаем Trails
         if State.trails.trail then
@@ -11387,6 +11628,7 @@ end)
 
 State.connections.targetStrafeLoop = G.RS.Heartbeat:Connect(function(deltaTime)
     updateTargetStrafe(deltaTime)
+    EXT.updateOrbit(deltaTime)
 end)
 
 if G.LP.Character then 
