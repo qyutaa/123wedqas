@@ -1,9 +1,33 @@
+-- ============================================================================
+-- >>> [ЧАСТЬ 1 / PART 1] ЯДРО, СОВМЕСТИМОСТЬ, СЕРВИСЫ И НАСТРОЙКИ <<<
+-- ============================================================================
 -- Dropdown ClickGUI - Premium Java Style with Full Aimbot
 
--- [[ SETTINGS ]]
+-- [1.1] Совместимость окружения (getgenv & Drawing API polyfill)
 if not getgenv then
     getgenv = function() return _G end
 end
+
+-- Защитный полифилл Drawing API для эксплойтов без встроенной библиотеки Drawing
+if typeof(Drawing) ~= "table" or typeof(Drawing.new) ~= "function" then
+    local dummyDrawing = {}
+    local dummyMt = {
+        __index = function(t, k) return rawget(t, k) or dummyDrawing end,
+        __newindex = function(t, k, v) rawset(t, k, v) end
+    }
+    dummyDrawing.Remove = function() end
+    dummyDrawing.Destroy = function() end
+    setmetatable(dummyDrawing, dummyMt)
+
+    Drawing = {
+        new = function()
+            local obj = {}
+            return setmetatable(obj, dummyMt)
+        end
+    }
+end
+
+-- [1.2] Глобальные настройки (Settings)
 
 getgenv().aim_settings = {
     enabled = false,
@@ -39,9 +63,10 @@ getgenv().aim_settings = {
     rainbow_crosshair = false,
     prediction_enabled = false,
     prediction_amount = 0.13,
-    prediction_mode = "Ping",      -- "Ping" / "Auto" / "Manual"
+    prediction_mode = "Auto",      -- "Auto" / "Ping" / "Manual"
     ping_multiplier = 1,           -- множитель к сетевой задержке
     auto_predict_strength = 1,
+    auto_predict_close_range = 25, -- ближе этого Auto срезает вынос, 0 - выкл
     smooth_enabled = false,
     smooth_amount = 0.1,
     noise_enabled = false,
@@ -164,9 +189,10 @@ getgenv().aim_settings = {
     panic_key = Enum.KeyCode.Delete,
     -- Hitboxes settings
     hitboxes_enabled = false,
+    hitboxes_mode = "Resize",       -- "Resize" (прямое увеличение, 100% для мечей и R6) / "Weld" (сварка)
     hitboxes_visualization = true,  -- false = хитбокс растёт, но выглядит как обычно
-    hitboxes_part = "Head",         -- "Head" / "Body" / "Both"
-    hitboxes_shape = "Ball",        -- форма самого хитбокса
+    hitboxes_part = "Head",         -- "Head" / "Body" / "Both" / "Root"
+    hitboxes_shape = "Ball",        -- форма самого хитбокса (для Weld)
     hitboxes_size = 15.0,
     hitboxes_transparency = 0.7,
     hitboxes_color = Color3.fromRGB(0, 170, 255),
@@ -241,7 +267,7 @@ getgenv().aim_settings = {
     clumsy_visualize = false, -- Показывать клон персонажа где застыли
 }
 
--- [[ SERVICES & GLOBALS ]]
+-- [1.3] Сервисы и системные переменные
 local G = {
     TS = game:GetService("TweenService"),
     UIS = game:GetService("UserInputService"),
@@ -251,8 +277,51 @@ local G = {
     Light = game:GetService("Lighting"),
     CP = game:GetService("ContentProvider")
 }
+
+-- Безопасная инициализация LocalPlayer и CurrentCamera
 G.LP = G.Plr.LocalPlayer
+if not G.LP then
+    pcall(function()
+        G.Plr:GetPropertyChangedSignal("LocalPlayer"):Wait()
+        G.LP = G.Plr.LocalPlayer
+    end)
+    G.LP = G.LP or G.Plr.LocalPlayer
+end
+
 G.Cam = workspace.CurrentCamera
+if not G.Cam then
+    pcall(function()
+        workspace:GetPropertyChangedSignal("CurrentCamera"):Wait()
+        G.Cam = workspace.CurrentCamera
+    end)
+    G.Cam = G.Cam or workspace.CurrentCamera
+end
+
+-- [1.4] Универсальный определитель безопасного родителя GUI (gethui / CoreGui / PlayerGui)
+local function getSafeGuiParent()
+    if gethui then
+        local success, hui = pcall(gethui)
+        if success and hui then return hui end
+    end
+    
+    local ok, coreGui = pcall(function() return game:GetService("CoreGui") end)
+    if ok and coreGui then
+        local test = Instance.new("Folder")
+        local canParent = pcall(function() test.Parent = coreGui test:Destroy() end)
+        if canParent then
+            return coreGui
+        end
+    end
+    
+    local lp = G.LP or game:GetService("Players").LocalPlayer
+    if lp then
+        local pgui = lp:FindFirstChildOfClass("PlayerGui") or lp:WaitForChild("PlayerGui", 5)
+        if pgui then return pgui end
+    end
+    
+    return game:GetService("CoreGui")
+end
+G.GuiParent = getSafeGuiParent()
 
 -- Utility
 local function tw(o, p, t) return G.TS:Create(o, TweenInfo.new(t or 0.25, Enum.EasingStyle.Quart, Enum.EasingDirection.Out), p):Play() end
@@ -1106,25 +1175,31 @@ local ICONS = {
 }
 
 -- [[ GUI CREATION ]]
-local ScreenGui = Instance.new("ScreenGui", game:GetService("CoreGui"))
+local ScreenGui = Instance.new("ScreenGui")
 ScreenGui.Name = "PremiumClickGUI"
 ScreenGui.ResetOnSpawn = false
 ScreenGui.ZIndexBehavior = Enum.ZIndexBehavior.Sibling
 ScreenGui.DisplayOrder = 100 -- Высокий приоритет отображения
+ScreenGui.Parent = G.GuiParent
 
 -- Background Blur Effect
-local BlurEffect = Instance.new("BlurEffect", G.Light)
-BlurEffect.Name = "ClickGuiBlur"
-BlurEffect.Size = 0
-BlurEffect.Enabled = false
+local BlurEffect
+pcall(function()
+    BlurEffect = Instance.new("BlurEffect")
+    BlurEffect.Name = "ClickGuiBlur"
+    BlurEffect.Size = 0
+    BlurEffect.Enabled = false
+    BlurEffect.Parent = G.Light
+end)
 
 -- Отдельный ScreenGui для затемнения (покрывает весь экран)
-local DarkenScreenGui = Instance.new("ScreenGui", game:GetService("CoreGui"))
+local DarkenScreenGui = Instance.new("ScreenGui")
 DarkenScreenGui.Name = "PremiumClickGUI_Darken"
 DarkenScreenGui.ResetOnSpawn = false
 DarkenScreenGui.IgnoreGuiInset = true
 DarkenScreenGui.ZIndexBehavior = Enum.ZIndexBehavior.Sibling
 DarkenScreenGui.DisplayOrder = -100 -- Очень низкий приоритет отображения
+DarkenScreenGui.Parent = G.GuiParent
 
 -- Background Darken Frame
 local DarkenFrame = Instance.new("Frame", DarkenScreenGui)
@@ -1156,11 +1231,19 @@ Instance.new("UICorner", ClickGuiImage).CornerRadius = UDim.new(0, 12)
 ScreenGui.IgnoreGuiInset = true
 
 -- Отдельный ScreenGui для HUD элементов (не скрывается с основным меню)
-local HudScreenGui = Instance.new("ScreenGui", game:GetService("CoreGui"))
+local HudScreenGui = Instance.new("ScreenGui")
 HudScreenGui.Name = "PremiumHUD"
 HudScreenGui.ResetOnSpawn = false
 HudScreenGui.ZIndexBehavior = Enum.ZIndexBehavior.Sibling
 HudScreenGui.DisplayOrder = 50 -- Средний приоритет
+HudScreenGui.Parent = G.GuiParent
+
+-- Защита от детекта античитами (syn.protect_gui)
+if syn and syn.protect_gui then
+    pcall(syn.protect_gui, ScreenGui)
+    pcall(syn.protect_gui, DarkenScreenGui)
+    pcall(syn.protect_gui, HudScreenGui)
+end
 
 -- [[ MESSENGER VARIABLES ]] - УДАЛЕНО, заменено на простой чат в основном меню
 
@@ -2717,6 +2800,16 @@ local function getPlayerFromMouse()
     return nil
 end
 
+-- ============================================================================
+-- >>> [ЧАСТЬ 2 / PART 2] БОЕВАЯ ЛОГИКА, ХИТБОКСЫ И МОДУЛИ (COMBAT & MODULES) <<<
+-- ============================================================================
+-- Включает:
+-- 2.1 Aimbot (захват целей, проверка видимости WallCheck, баллистика, сглаживание)
+-- 2.2 Hitboxes (режимы Resize и Weld, полная поддержка R6 Torso и R15)
+-- 2.3 Orbit & Target Strafe (облёт цели по кругу)
+-- 2.4 Visuals (Aura, China Hat, Trails, ESP Box, Tracers, Chams)
+-- 2.5 Movement & World (Spider, Fly, Speed, FullBright, Anti-Fling)
+
 -- [[ AIMBOT FUNCTIONS ]]
 local function hasLineOfSight(targetPart)
     if not targetPart or not targetPart.Parent then
@@ -2813,18 +2906,36 @@ local function getClosest()
     return target
 end
 
--- Data Ping - это полный оборот пакета до сервера и обратно, в миллисекундах.
--- Ровно на это время наша картинка отстаёт от того, что видит сервер, поэтому
--- оно и есть базовое упреждение. Потолок в 250 мс страхует от выбросов: при
--- разрыве связи значение улетает в тысячи и прицел уводило бы за горизонт.
+-- Надежное получение задержки (Ping) с многоуровневым fallback
 local function getPingSeconds()
-    local ok, pingValue = pcall(function()
+    -- 1. Официальный метод Roblox LocalPlayer (секунды)
+    local ok1, ping = pcall(function()
+        if G.LP and type(G.LP.GetNetworkPing) == "function" then
+            return G.LP:GetNetworkPing()
+        end
+    end)
+    if ok1 and type(ping) == "number" and ping > 0 and ping < 1 then
+        return ping
+    end
+
+    -- 2. PerformanceStats.Ping (миллисекунды)
+    local ok2, perfPing = pcall(function()
+        return game:GetService("Stats").PerformanceStats.Ping:GetValue()
+    end)
+    if ok2 and type(perfPing) == "number" and perfPing > 0 then
+        return math.clamp(perfPing / 1000, 0.015, 0.35)
+    end
+
+    -- 3. Data Ping
+    local ok3, dataPing = pcall(function()
         return game:GetService("Stats").Network.ServerStatsItem["Data Ping"]:GetValue()
     end)
-    if not ok then
-        return 0
+    if ok3 and type(dataPing) == "number" and dataPing > 0 then
+        return math.clamp(dataPing / 1000, 0.015, 0.35)
     end
-    return math.clamp(math.max(0, pingValue) / 1000, 0, 0.25)
+
+    -- Дефолтный пинг (60 мс) вместо 0 при недоступности статистики
+    return 0.060
 end
 
 -- modeOverride позволяет считать чужим режимом: Orbit держит собственный
@@ -2834,9 +2945,7 @@ local function getPredictedPosition(part, modeOverride)
         return part and part.Position or Vector3.new(0, 0, 0)
     end
     
-    -- AssemblyLinearVelocity - скорость всей сборки персонажа. У отдельной
-    -- детали Velocity может быть нулевой, пока её тащит сустав, и упреждение
-    -- тогда молча обнулялось.
+    -- AssemblyLinearVelocity - реальная скорость всей сборки персонажа
     local success, velocity = pcall(function()
         return part.AssemblyLinearVelocity or part.Velocity
     end)
@@ -2847,42 +2956,87 @@ local function getPredictedPosition(part, modeOverride)
     local s = getgenv().aim_settings
     local horizontalVelocity = Vector3.new(velocity.X, 0, velocity.Z)
     local speed = horizontalVelocity.Magnitude
-    local mode = modeOverride or s.prediction_mode or "Ping"
+    local mode = modeOverride or s.prediction_mode or "Auto"
 
-    local prediction
-    if mode == "Ping" then
-        -- Пока пакет идёт до сервера и обратно, цель успевает пройти
-        -- velocity * ping. Целимся туда, где она окажется, а не туда, где мы
-        -- её видим. Множитель нужен потому, что разные игры компенсируют
-        -- задержку по-своему и «честного» пинга иногда мало.
-        prediction = getPingSeconds() * (s.ping_multiplier or 1)
-    elseif mode == "Auto" then
-        -- К задержке добавляется поправка на скорость: чем быстрее цель,
-        -- тем сильнее на упреждение влияет сглаживание её движения.
-        prediction = (getPingSeconds() + math.clamp(speed / 220, 0, 0.22))
-            * (s.auto_predict_strength or 1)
-    else
-        -- Ручной режим: половина ползунка, масштабируется скоростью
-        prediction = s.prediction_amount * 0.5
-        if speed > 0 then
-            prediction = prediction * (speed / 20)
-        end
+    -- Если цель стоит на месте (скорость близка к 0), упреждение НЕ применяется,
+    -- чтобы прицел не уезжал в сторону и не дрожал на неподвижном игроке
+    if speed < 1.0 and math.abs(velocity.Y) < 1.0 then
+        return part.Position
     end
+
+    local camera = G.Cam
+    local distance = camera
+        and (part.Position - camera.CFrame.Position).Magnitude
+        or 20
 
     local character = part.Parent
     local humanoid = character:FindFirstChildOfClass("Humanoid")
-    if humanoid and humanoid.Health > 0 then
-        local state = humanoid:GetState()
-        if state == Enum.HumanoidStateType.Freefall then
-            -- В падении цель разгоняется вниз. В авторежиме поправка мягче:
-            -- вертикальная скорость уже учтена в самом векторе velocity.
-            prediction = prediction * ((mode == "Manual") and 3 or 1.6)
-        elseif state == Enum.HumanoidStateType.Jumping then
-            prediction = prediction * 1.5
+    local walkSpeed = (humanoid and humanoid.WalkSpeed > 0) and humanoid.WalkSpeed or 16
+
+    local prediction
+    if mode == "Auto" then
+        -- АВТОМАТИЧЕСКАЯ АДАПТИВНАЯ ПРЕДИКЦИЯ:
+        -- 1. Базовый расчет от пинга и сетевого интерполяционного буфера Roblox (~100 мс)
+        local ping = getPingSeconds()
+        local basePred = 0.105 + (ping * 0.40)
+
+        -- 2. Подстройка под скорость цели:
+        -- Стандартная скорость ходьбы (WalkSpeed) в Roblox = 16.
+        -- Если скорость ровно 16 (обычный бег): множитель = 1.0 (идеальное упреждение).
+        -- Если цель бежит быстрее 16 (спринт 24-28, спидкоилы/макросы 32-50+): упреждение
+        -- динамически увеличивается для компенсации повышенного рассинхрона на высокой скорости.
+        -- Если цель двигается медленнее 16 (крадется, замедлена): упреждение пропорционально снижается.
+        local speedScale = 1.0
+        if speed > 16.5 then
+            speedScale = 1.0 + math.clamp((speed - 16) / 70, 0, 0.35)
+        elseif speed < 15.5 and speed >= 1.0 then
+            speedScale = math.clamp(speed / 16, 0.45, 1.0)
+        end
+
+        -- Учитываем нестандартный WalkSpeed персонажа в игре (если игра задает базовую скорость выше/ниже 16)
+        if walkSpeed ~= 16 and walkSpeed > 0 then
+            local wsRatio = math.clamp(walkSpeed / 16, 0.75, 1.35)
+            speedScale = speedScale * (0.5 + 0.5 * wsRatio)
+        end
+
+        prediction = basePred * speedScale * (s.auto_predict_strength or 1)
+
+        -- В упор (< 5 стадов) мягко демпфируем, чтобы прицел в рукопашной не перелетал сквозь цель
+        if distance < 5 then
+            prediction = prediction * math.clamp(distance / 5, 0.40, 1.0)
+        end
+    elseif mode == "Ping" then
+        prediction = getPingSeconds() * (s.ping_multiplier or 1)
+        if speed > 0 then
+            prediction = prediction * math.clamp(speed / 16, 0.5, 1.5)
+        end
+    else
+        -- Ручной режим (Manual)
+        prediction = (s.prediction_amount or 0.13) * 0.5
+        if speed > 0 then
+            prediction = prediction * (speed / 16)
         end
     end
 
-    return part.Position + (velocity * prediction)
+    -- Горизонтальный вынос строго по вектору движения
+    local horizOffset = horizontalVelocity * prediction
+
+    -- Вертикальный вынос рассчитываем с учетом гравитации и прыжков,
+    -- чтобы при прыжке цель не подбрасывало высоко над головой
+    local vertPred = prediction * 0.75
+    if humanoid and humanoid.Health > 0 then
+        local state = humanoid:GetState()
+        if state == Enum.HumanoidStateType.Freefall then
+            vertPred = prediction * 0.60
+        elseif state == Enum.HumanoidStateType.Jumping then
+            vertPred = prediction * 0.85
+        end
+    end
+    local vertOffset = Vector3.new(0, velocity.Y * vertPred, 0)
+
+    local offset = horizOffset + vertOffset
+
+    return part.Position + offset
 end
 
 local function getTargetStrafePlayer()
@@ -3503,33 +3657,46 @@ end
 
 -- ============================================================================
 -- [[ HITBOXES ]] Расширение хитбоксов игроков.
--- Хитбокс - ОТДЕЛЬНАЯ деталь поверх цели, а не раздутая деталь персонажа.
--- Менять размер настоящих деталей нельзя: у Motor6D смещения суставов
--- считаются от размеров, поэтому раздутый HumanoidRootPart ломал скелет -
--- игроки застывали на месте. Своя деталь ничего не ломает и убирается
--- одним Destroy, без запоминания и восстановления исходных свойств.
+-- Поддерживает 2 режима:
+-- 1. "Resize" (по умолчанию) - прямое увеличение деталей персонажа (Head, Torso...).
+--    Это единственный метод, 100% работающий на мечи, R6/R15, Touched и Raycast.
+--    Благодаря CanCollide = false и Massless = true персонажи НЕ застревают и ходят нормально.
+-- 2. "Weld" - создание отдельной детали с физической сваркой (WeldConstraint).
+--    Деталь не заанкорена (Anchored = false) и имеет CanTouch = true,
+--    благодаря чему мечи регистрируют касание .Touched.
 -- ============================================================================
 do
 
--- цель (деталь персонажа) -> наш хитбокс
-local boxes = {}
+local boxes = {}          -- target -> custom box Part (для режима Weld)
+local originalProps = {}  -- target -> исходные свойства (для режима Resize)
+local lastMode = nil
 
--- Голова есть в каждом режиме: по ней считается попадание в большинстве игр,
--- и терять её при переключении на корпус смысла нет. Режим задаёт лишь то,
--- что добавляется сверху. UpperTorso и Torso перечислены оба - у персонажа
--- есть только один из них (R15 и R6), лишнее имя просто не находится.
 local HITBOX_TARGETS = {
     Head = {"Head"},
-    Body = {"Head", "HumanoidRootPart"},
-    Both = {"Head", "HumanoidRootPart", "UpperTorso", "Torso"}
+    Body = {"Torso", "UpperTorso", "LowerTorso"},
+    Both = {"Head", "Torso", "UpperTorso", "LowerTorso"},
+    Root = {"HumanoidRootPart"}
 }
 
--- Шар у сферической детали строится по наименьшей стороне, поэтому размер
--- всегда задаётся одинаковым по всем осям.
 local HITBOX_SHAPES = {
     Ball = Enum.PartType.Ball,
     Block = Enum.PartType.Block
 }
+
+local function restoreTarget(target)
+    local orig = originalProps[target]
+    originalProps[target] = nil
+    if orig and target and target.Parent then
+        pcall(function()
+            target.Size = orig.size
+            target.Transparency = orig.transparency
+            target.Color = orig.color
+            target.Material = orig.material
+            target.CanCollide = orig.canCollide
+            target.Massless = orig.massless
+        end)
+    end
+end
 
 local function destroyBox(target)
     local box = boxes[target]
@@ -3544,36 +3711,90 @@ local function clearAll()
         destroyBox(target)
     end
     boxes = {}
+
+    for target in pairs(originalProps) do
+        restoreTarget(target)
+    end
+    originalProps = {}
 end
 EXT.clearHitboxes = clearAll
 
-local function ensureBox(target)
+local function ensureWeldBox(target, s, size)
     local box = boxes[target]
-    if box and box.Parent then return box end
+    if box and box.Parent then
+        box.Size = Vector3.new(size, size, size)
+        box.Shape = HITBOX_SHAPES[s.hitboxes_shape] or Enum.PartType.Ball
+        if s.hitboxes_visualization then
+            box.Transparency = s.hitboxes_transparency
+            box.Color = s.hitboxes_color
+        else
+            box.Transparency = 1
+        end
+        return box
+    end
 
     box = Instance.new("Part")
-    box.Name = "MoonwareHitbox"
-    box.Shape = HITBOX_SHAPES[getgenv().aim_settings.hitboxes_shape]
-        or Enum.PartType.Ball
+    box.Name = target.Name
+    box.Shape = HITBOX_SHAPES[s.hitboxes_shape] or Enum.PartType.Ball
     box.Material = Enum.Material.Neon
-    box.Transparency = 1
-    box.Size = Vector3.new(1, 1, 1)
+    box.Size = Vector3.new(size, size, size)
     box.CFrame = target.CFrame
-    -- Деталь якорная, положение задаём сами каждый кадр: сварка отдала бы её
-    -- физике и сетевому владельцу, а это лишний источник рассинхрона.
-    box.Anchored = true
+    box.Anchored = false
     box.CanCollide = false
     box.Massless = true
-    -- Попадание считают и по касанию, и по лучу - нужно и то, и другое
     box.CanTouch = true
     box.CanQuery = true
     box.CastShadow = false
     box.Locked = true
-    -- Внутрь модели персонажа: проверки игры обычно смотрят именно там
-    box.Parent = target.Parent
 
+    if s.hitboxes_visualization then
+        box.Transparency = s.hitboxes_transparency
+        box.Color = s.hitboxes_color
+    else
+        box.Transparency = 1
+    end
+
+    local weld = Instance.new("WeldConstraint")
+    weld.Name = "MoonwareHitboxWeld"
+    weld.Part0 = box
+    weld.Part1 = target
+    weld.Parent = box
+
+    box.Parent = target.Parent
     boxes[target] = box
     return box
+end
+
+local function applyResize(target, s, size)
+    if not originalProps[target] then
+        originalProps[target] = {
+            size = target.Size,
+            transparency = target.Transparency,
+            color = target.Color,
+            material = target.Material,
+            canCollide = target.CanCollide,
+            massless = target.Massless
+        }
+    end
+
+    pcall(function()
+        target.Size = Vector3.new(size, size, size)
+        target.CanCollide = false
+        target.Massless = true
+
+        if s.hitboxes_visualization then
+            target.Transparency = s.hitboxes_transparency
+            target.Color = s.hitboxes_color
+            target.Material = Enum.Material.Neon
+        else
+            local orig = originalProps[target]
+            if orig then
+                target.Transparency = orig.transparency
+                target.Color = orig.color
+                target.Material = orig.material
+            end
+        end
+    end)
 end
 
 local function shouldAffect(player, s, myPos)
@@ -3611,6 +3832,12 @@ function EXT.updateHitboxes()
         return
     end
 
+    local currentMode = s.hitboxes_mode or "Resize"
+    if lastMode ~= currentMode then
+        clearAll()
+        lastMode = currentMode
+    end
+
     State.hitboxesActive = true
 
     local names = HITBOX_TARGETS[s.hitboxes_part] or HITBOX_TARGETS.Head
@@ -3625,31 +3852,29 @@ function EXT.updateHitboxes()
                 local target = player.Character:FindFirstChild(name)
                 if target and target:IsA("BasePart") then
                     keep[target] = true
-                    pcall(function()
-                        local box = ensureBox(target)
-                        -- Форму применяем каждый кадр, иначе смена в меню
-                        -- подхватилась бы только после пересоздания хитбокса
-                        box.Shape = HITBOX_SHAPES[s.hitboxes_shape] or Enum.PartType.Ball
-                        box.Size = Vector3.new(size, size, size)
-                        box.CFrame = target.CFrame
-                        if s.hitboxes_visualization then
-                            box.Transparency = s.hitboxes_transparency
-                            box.Color = s.hitboxes_color
-                        else
-                            box.Transparency = 1
-                        end
-                    end)
+                    if currentMode == "Resize" then
+                        applyResize(target, s, size)
+                    else
+                        pcall(function()
+                            ensureWeldBox(target, s, size)
+                        end)
+                    end
                 end
             end
         end
     end
 
-    -- Смена детали, выход игрока, добавление в друзья, уход за дистанцию,
-    -- смерть, респавн - все случаи сходятся сюда: цель больше не в списке,
-    -- значит её хитбокс лишний.
-    for target in pairs(boxes) do
-        if not keep[target] then
-            destroyBox(target)
+    if currentMode == "Resize" then
+        for target in pairs(originalProps) do
+            if not keep[target] then
+                restoreTarget(target)
+            end
+        end
+    else
+        for target in pairs(boxes) do
+            if not keep[target] then
+                destroyBox(target)
+            end
         end
     end
 end
@@ -4285,8 +4510,20 @@ function CategoryPanel:addModule(moduleName, settingKey, hasSettings)
     
     moduleData.container = container
     moduleData.btn = btn
-    -- Индекс для строки поиска по меню
-    table.insert(State.moduleIndex, {name = moduleName, container = container, module = moduleData})
+    -- Индекс для строки поиска по меню (защита от дублирования записей)
+    local foundIndex = nil
+    for idx, entry in ipairs(State.moduleIndex) do
+        if entry.name == moduleName or entry.container == container then
+            foundIndex = idx
+            break
+        end
+    end
+    local indexEntry = {name = moduleName, container = container, module = moduleData}
+    if foundIndex then
+        State.moduleIndex[foundIndex] = indexEntry
+    else
+        table.insert(State.moduleIndex, indexEntry)
+    end
     moduleData.arrowLbl = arrowLbl
     moduleData.bindBox = bindBox
     moduleData.settingsList = settingsList
@@ -6420,12 +6657,14 @@ end
 -- ============================================================================
 do
 
-EXT.GlowGui = Instance.new("ScreenGui", game:GetService("CoreGui"))
+EXT.GlowGui = Instance.new("ScreenGui")
 EXT.GlowGui.Name = "PremiumMouseGlow"
 EXT.GlowGui.ResetOnSpawn = false
 EXT.GlowGui.IgnoreGuiInset = true
 EXT.GlowGui.ZIndexBehavior = Enum.ZIndexBehavior.Sibling
 EXT.GlowGui.DisplayOrder = 200
+EXT.GlowGui.Parent = G.GuiParent
+if syn and syn.protect_gui then pcall(syn.protect_gui, EXT.GlowGui) end
 
 EXT.MouseGlow = Instance.new("Frame", EXT.GlowGui)
 EXT.MouseGlow.Name = "MouseGlow"
@@ -6903,7 +7142,18 @@ local function updatePanelAnimation(deltaTime)
     end
 end
 
+-- ============================================================================
+-- >>> [ЧАСТЬ 3 / PART 3] СБОРКА ИНТЕРФЕЙСА (CLICKGUI), КОНФИГИ И ГЛАВНЫЕ ЦИКЛЫ <<<
+-- ============================================================================
+-- Включает:
+-- 3.1 Сборка категорий меню: Combat, Visuals, Movement, Misc, Config
+-- 3.2 Менеджер конфигураций (сохранение/загрузка конфигов в JSON)
+-- 3.3 Панель чата (Chat panel)
+-- 3.4 Главные циклы RunService (Heartbeat, RenderStepped)
+-- 3.5 Обработчики клавиш и автозапуск скрипта
+
 do
+State.moduleIndex = {}
 -- 1. COMBAT
 local pCombat = CategoryPanel.new("Combat", startX, 50, panelW)
 M.Aimbot = pCombat:addModule("Aimbot", "enabled", true)
@@ -6921,9 +7171,9 @@ pCombat:addBoolean(M.Aimbot, "Ignore Team", "ignore_team")
 
 pCombat:addSection(M.Aimbot, "Prediction")
 pCombat:addBoolean(M.Aimbot, "Prediction", "prediction_enabled")
-pCombat:addDropdown(M.Aimbot, "Prediction Mode", "prediction_mode", {"Ping", "Auto", "Manual"})
-pCombat:addSlider(M.Aimbot, "Ping Multiplier", "ping_multiplier", 0.2, 3, 0.1)
+pCombat:addDropdown(M.Aimbot, "Prediction Mode", "prediction_mode", {"Auto", "Ping", "Manual"})
 pCombat:addSlider(M.Aimbot, "Auto Strength", "auto_predict_strength", 0.2, 3, 0.1)
+pCombat:addSlider(M.Aimbot, "Ping Multiplier", "ping_multiplier", 0.2, 3, 0.1)
 pCombat:addSlider(M.Aimbot, "Predict Amount", "prediction_amount", 0, 0.5, 0.01)
 
 pCombat:addSection(M.Aimbot, "Aim Assist")
@@ -6946,8 +7196,10 @@ pCombat:addBoolean(M.Orbit, "Prediction", "orbit_prediction")
 pCombat:addBoolean(M.Orbit, "Auto Prediction", "orbit_auto_prediction")
 
 M.Hitboxes = pCombat:addModule("Hitboxes", "hitboxes_enabled", true)
+pCombat:addSection(M.Hitboxes, "Mode")
+pCombat:addDropdown(M.Hitboxes, "Mode", "hitboxes_mode", {"Resize", "Weld"})
 pCombat:addSection(M.Hitboxes, "Shape")
-pCombat:addDropdown(M.Hitboxes, "Part", "hitboxes_part", {"Head", "Body", "Both"})
+pCombat:addDropdown(M.Hitboxes, "Part", "hitboxes_part", {"Head", "Body", "Both", "Root"})
 pCombat:addDropdown(M.Hitboxes, "Shape", "hitboxes_shape", {"Ball", "Block"})
 pCombat:addSlider(M.Hitboxes, "Size", "hitboxes_size", 1.0, 30.0, 0.5)
 
@@ -10281,6 +10533,7 @@ State.connections.mainLoop = G.RS.RenderStepped:Connect(function()
         end
 
         State.connections = {}
+        State.moduleIndex = {}
         
         -- Очищаем Game Scripts connections
         
