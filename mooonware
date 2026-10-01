@@ -47,14 +47,16 @@ getgenv().aim_settings = {
     esp_self = false,
     esp_chams = false,
     esp_glow_chams = false,
+    esp_chams_outline = false,
+    esp_chams_team_check = false,
+    esp_chams_color = Color3.fromRGB(255, 255, 255),
     esp_nametags = true,
     esp_hp_bar = true,
     esp_tool = true,
     esp_distance = true,
+    esp_labels_team_check = false,
     esp_hide_team = false,
     esp_team_color = false,
-    esp_chams_outline = false,
-    esp_chams_color = Color3.fromRGB(255, 255, 255),
     friend_markers = false,
     arrows = false,
     arrows_radius = 60,
@@ -198,8 +200,6 @@ getgenv().aim_settings = {
     hitboxes_color = Color3.fromRGB(0, 170, 255),
     hitboxes_ignore_team = false,
     hitboxes_max_distance = 0,      -- 0 = без ограничения по дистанции
-    -- Chat settings
-    chat_enabled = false,
     -- Misc settings
     anti_fling = false, -- AntiFling - убирает коллизию с игроками
     -- Config settings
@@ -368,9 +368,6 @@ local State = {
     uiRefreshers = {},
     lastClientColor = nil,
     panels = {},
-    messagesCache = {},
-    lastFetchTime = 0,
-    cacheTimeout = 2,
     targetRotation = 0,
     rotationDirection = 1,
     jumpCircles = {},
@@ -378,6 +375,8 @@ local State = {
     watermark = {
         rotation = 0,
         lastUpdateTime = 0,
+        lastFPSTime = 0,
+        frameCount = 0,
         currentFPS = 60,
         currentPing = 0,
         displayFPS = 60,
@@ -725,16 +724,18 @@ Movement.Spider = {
             State.spider.platform.Material = Enum.Material.ForceField
             State.spider.platform.CastShadow = false
             
+            local spiderDirs = {Vector3.new(1,0,0), Vector3.new(-1,0,0), Vector3.new(0,0,1), Vector3.new(0,0,-1)}
+            State.spider.rp = RaycastParams.new()
+            State.spider.rp.FilterDescendantsInstances = {State.spider.ch}
+            State.spider.rp.FilterType = G.RayExclude
+            
             State.spider.platformConnection = G.RS.Heartbeat:Connect(function()
                 if not getgenv().aim_settings.spider_enabled or not (State.spider.platform and State.spider.hr and State.spider.hr.Parent) then
                     Movement.Spider.Cleanup()
                     return
                 end
                 State.spider.wd = false
-                for _, d in ipairs({Vector3.new(1,0,0), Vector3.new(-1,0,0), Vector3.new(0,0,1), Vector3.new(0,0,-1)}) do
-                    State.spider.rp = RaycastParams.new()
-                    State.spider.rp.FilterDescendantsInstances = {State.spider.ch}
-                    State.spider.rp.FilterType = G.RayExclude
+                for _, d in ipairs(spiderDirs) do
                     if workspace:Raycast(State.spider.hr.Position, d * 3, State.spider.rp) then
                         State.spider.wd = true
                         break
@@ -983,7 +984,6 @@ local UI = {
     avatarStroke = nil,
     TargetMetaLabel = nil,
     HPBarGradient = nil,
-    ChatSendBtn = nil,
     ScreenGui = nil,
     HudScreenGui = nil,
     DarkenScreenGui = nil,
@@ -1143,11 +1143,7 @@ local function updateAllColors()
     
     -- Хитбоксы красить здесь не нужно: EXT.updateHitboxes() берёт цвет
     -- из настроек каждый кадр и сам подхватит новое значение.
-    
-    -- Обновляем цвета чата
-    if ChatSendBtn then
-        ChatSendBtn.BackgroundColor3 = clientColor
-    end
+
     
     -- Обновляем цвет платформы Infinite Jump
     if IJ and IJ.p then
@@ -1243,141 +1239,6 @@ if syn and syn.protect_gui then
     pcall(syn.protect_gui, ScreenGui)
     pcall(syn.protect_gui, DarkenScreenGui)
     pcall(syn.protect_gui, HudScreenGui)
-end
-
--- [[ MESSENGER VARIABLES ]] - УДАЛЕНО, заменено на простой чат в основном меню
-
--- API данные для JSONBin
-local JSONBIN_CONFIG = {
-    masterKey = "$2a$10$U6bla5mf3k3c1E9QPBCYuOP02OHKgT4ZNsZpXlIcJ969qf7zA.0Wu",
-    accessKey = "$2a$10$.pcZ3pqlRmdcPA3gnYgRX.yJIv02FHpqy.tbe7P5TiteZdyrysFzy",
-    binId = "69d5965c36566621a88bb8a0",
-    baseUrl = "https://api.jsonbin.io/v3/b/"
-}
-
--- Функция для HTTP запросов через эксплоит
-local function makeHttpRequest(method, url, headers, body)
-    local success, result = pcall(function()
-        if method == "GET" then
-            return {
-                Success = true,
-                Body = request({
-                    Url = url,
-                    Method = "GET",
-                    Headers = headers
-                }).Body
-            }
-        elseif method == "PUT" then
-            return {
-                Success = true,
-                Body = request({
-                    Url = url,
-                    Method = "PUT",
-                    Headers = headers,
-                    Body = body
-                }).Body
-            }
-        end
-    end)
-    
-    -- result может быть nil (неизвестный метод) — без проверки типа тут было
-    -- "attempt to index nil value".
-    if success and type(result) == "table" and result.Success then
-        return result.Body
-    end
-    warn("HTTP Request failed:", tostring(result))
-    return nil
-end
-
--- Кэш для сообщений
-local cacheTimeout = 2 -- Кэш на 2 секунды
-
--- Функция для получения сообщений с сервера
-local function fetchMessages()
-    -- Используем кэш если прошло меньше 2 секунд
-    local currentTime = tick()
-    if currentTime - State.lastFetchTime < State.cacheTimeout and #State.messagesCache > 0 then
-        return State.messagesCache
-    end
-    
-    local headers = {
-        ["X-Master-Key"] = JSONBIN_CONFIG.masterKey,
-        ["X-Access-Key"] = JSONBIN_CONFIG.accessKey
-    }
-    
-    local url = JSONBIN_CONFIG.baseUrl .. JSONBIN_CONFIG.binId .. "/latest"
-    local response = makeHttpRequest("GET", url, headers)
-    
-    if response then
-        local success, data = pcall(function()
-            return G.Http:JSONDecode(response)
-        end)
-        
-        if success and data and data.record and data.record.messages then
-            State.messagesCache = data.record.messages
-            State.lastFetchTime = currentTime
-            return State.messagesCache
-        else
-            warn("Failed to parse messages:", data)
-        end
-    else
-        warn("Failed to fetch messages from server")
-    end
-    
-    -- Возвращаем кэш если запрос не удался
-    return State.messagesCache or {}
-end
-
--- Функция для отправки сообщения на сервер
-local function sendMessage(message)
-    if not message or message:gsub("%s", "") == "" then return end
-    
-    local messages = fetchMessages()
-    
-    -- Добавляем новое сообщение
-    local newMessage = {
-        userid = G.LP.UserId,
-        username = G.LP.Name,
-        message = message,
-        timestamp = os.time(),
-        chat = "global"
-    }
-    
-    table.insert(messages, newMessage)
-    
-    -- Ограничиваем количество сообщений (последние 100)
-    if #messages > 100 then
-        local newMessages = {}
-        for i = #messages - 99, #messages do
-            table.insert(newMessages, messages[i])
-        end
-        messages = newMessages
-    end
-    
-    -- Обновляем кэш
-    State.messagesCache = messages
-    State.lastFetchTime = tick()
-    
-    local data = {
-        messages = messages
-    }
-    
-    local headers = {
-        ["Content-Type"] = "application/json",
-        ["X-Master-Key"] = JSONBIN_CONFIG.masterKey,
-        ["X-Access-Key"] = JSONBIN_CONFIG.accessKey
-    }
-    
-    local url = JSONBIN_CONFIG.baseUrl .. JSONBIN_CONFIG.binId
-    local body = G.Http:JSONEncode(data)
-    
-    local success = pcall(function()
-        makeHttpRequest("PUT", url, headers, body)
-    end)
-    
-    if not success then
-        warn("Failed to send message to server")
-    end
 end
 
 -- Target ESP будет создаваться динамически на игроке через BillboardGui
@@ -2358,7 +2219,7 @@ local function updateChinaHatPosition(hatData, head, shouldHide)
 
             local layerMesh = hatData.meshes and hatData.meshes[i]
             if layerMesh then
-                -- Слои чуть «дышат» по радиусу и вразнобой по фазе
+                -- Слои чуть "дышат" по радиусу и вразнобой по фазе
                 local breathe = 1 + math.sin(clock * 1.8 + i * 1.3) * 0.03
                 layerMesh.Scale = Vector3.new(
                     spec.scale * size * breathe,
@@ -2775,6 +2636,47 @@ local function isFriend(playerName)
     return table.find(getgenv().aim_settings.friends, playerName) ~= nil
 end
 
+-- [[ TEAM SYSTEM ]]
+local function isTeammate(player)
+    if not player or player == G.LP then return false end
+
+    -- 1. Официальный Team объект
+    if G.LP.Team and player.Team then
+        if player.Team == G.LP.Team or player.Team.Name == G.LP.Team.Name then
+            return true
+        end
+    end
+
+    -- 2. TeamColor проверка (для плейсов без формальных Team экземпляров)
+    if player.TeamColor and G.LP.TeamColor then
+        if not player.Neutral and not G.LP.Neutral then
+            if player.TeamColor == G.LP.TeamColor or player.TeamColor.Name == G.LP.TeamColor.Name then
+                return true
+            end
+        end
+    end
+
+    -- 3. Attributes (игры с кастомной системой команд, например BedWars / Rivals)
+    local myTeamAttr = G.LP:GetAttribute("Team") or (G.LP.Character and G.LP.Character:GetAttribute("Team"))
+    local theirTeamAttr = player:GetAttribute("Team") or (player.Character and player.Character:GetAttribute("Team"))
+    if myTeamAttr and theirTeamAttr and myTeamAttr == theirTeamAttr then
+        return true
+    end
+
+    -- 4. Leaderstats team
+    local myLs = G.LP:FindFirstChild("leaderstats")
+    local theirLs = player:FindFirstChild("leaderstats")
+    if myLs and theirLs then
+        local myT = myLs:FindFirstChild("Team") or myLs:FindFirstChild("Squad")
+        local theirT = theirLs:FindFirstChild("Team") or theirLs:FindFirstChild("Squad")
+        if myT and theirT and myT.Value == theirT.Value and tostring(myT.Value) ~= "" then
+            return true
+        end
+    end
+
+    return false
+end
+
 local function toggleFriend(playerName)
     local index = table.find(getgenv().aim_settings.friends, playerName)
     if index then
@@ -2854,7 +2756,7 @@ local function getClosest()
             end
             
             -- Пропускаем игроков из своей команды если включен Ignore Team
-            if getgenv().aim_settings.ignore_team and v.Team == G.LP.Team and v.Team ~= nil then
+            if getgenv().aim_settings.ignore_team and isTeammate(v) then
                 continue
             end
             
@@ -2907,15 +2809,15 @@ local function getClosest()
 end
 
 -- Надежное получение задержки (Ping) с многоуровневым fallback
-local function getPingSeconds()
-    -- 1. Официальный метод Roblox LocalPlayer (секунды)
+local function getRobloxPingMs()
+    -- 1. Официальный метод Roblox LocalPlayer (секунды -> мс)
     local ok1, ping = pcall(function()
         if G.LP and type(G.LP.GetNetworkPing) == "function" then
             return G.LP:GetNetworkPing()
         end
     end)
-    if ok1 and type(ping) == "number" and ping > 0 and ping < 1 then
-        return ping
+    if ok1 and type(ping) == "number" and ping > 0 then
+        return math.clamp(math.round(ping * 1000), 1, 9999)
     end
 
     -- 2. PerformanceStats.Ping (миллисекунды)
@@ -2923,19 +2825,24 @@ local function getPingSeconds()
         return game:GetService("Stats").PerformanceStats.Ping:GetValue()
     end)
     if ok2 and type(perfPing) == "number" and perfPing > 0 then
-        return math.clamp(perfPing / 1000, 0.015, 0.35)
+        return math.clamp(math.round(perfPing), 1, 9999)
     end
 
-    -- 3. Data Ping
+    -- 3. Data Ping (миллисекунды)
     local ok3, dataPing = pcall(function()
         return game:GetService("Stats").Network.ServerStatsItem["Data Ping"]:GetValue()
     end)
     if ok3 and type(dataPing) == "number" and dataPing > 0 then
-        return math.clamp(dataPing / 1000, 0.015, 0.35)
+        return math.clamp(math.round(dataPing), 1, 9999)
     end
 
     -- Дефолтный пинг (60 мс) вместо 0 при недоступности статистики
-    return 0.060
+    return 60
+end
+
+local function getPingSeconds()
+    local ms = getRobloxPingMs()
+    return math.clamp(ms / 1000, 0.015, 0.35)
 end
 
 -- modeOverride позволяет считать чужим режимом: Orbit держит собственный
@@ -3372,7 +3279,7 @@ local function isValidTarget(s, player, myPos)
     local character = player.Character
     if not character then return false end
     if isFriend(player.Name) then return false end
-    if s.ignore_team and player.Team ~= nil and player.Team == G.LP.Team then
+    if s.ignore_team and isTeammate(player) then
         return false
     end
 
@@ -3671,17 +3578,58 @@ local boxes = {}          -- target -> custom box Part (для режима Weld
 local originalProps = {}  -- target -> исходные свойства (для режима Resize)
 local lastMode = nil
 
-local HITBOX_TARGETS = {
-    Head = {"Head"},
-    Body = {"Torso", "UpperTorso", "LowerTorso"},
-    Both = {"Head", "Torso", "UpperTorso", "LowerTorso"},
-    Root = {"HumanoidRootPart"}
-}
-
 local HITBOX_SHAPES = {
     Ball = Enum.PartType.Ball,
     Block = Enum.PartType.Block
 }
+
+local function getTargetParts(character, partSetting)
+    if not character then return {} end
+    local isR15 = character:FindFirstChild("UpperTorso") ~= nil
+    local parts = {}
+
+    if partSetting == "Head" then
+        local h = character:FindFirstChild("Head")
+        if h and h:IsA("BasePart") and not h:GetAttribute("IsHitboxPart") then
+            table.insert(parts, h)
+        end
+    elseif partSetting == "Body" then
+        if isR15 then
+            local ut = character:FindFirstChild("UpperTorso")
+            if ut and ut:IsA("BasePart") and not ut:GetAttribute("IsHitboxPart") then
+                table.insert(parts, ut)
+            end
+        else
+            local t = character:FindFirstChild("Torso")
+            if t and t:IsA("BasePart") and not t:GetAttribute("IsHitboxPart") then
+                table.insert(parts, t)
+            end
+        end
+    elseif partSetting == "Both" then
+        local h = character:FindFirstChild("Head")
+        if h and h:IsA("BasePart") and not h:GetAttribute("IsHitboxPart") then
+            table.insert(parts, h)
+        end
+        if isR15 then
+            local ut = character:FindFirstChild("UpperTorso")
+            if ut and ut:IsA("BasePart") and not ut:GetAttribute("IsHitboxPart") then
+                table.insert(parts, ut)
+            end
+        else
+            local t = character:FindFirstChild("Torso")
+            if t and t:IsA("BasePart") and not t:GetAttribute("IsHitboxPart") then
+                table.insert(parts, t)
+            end
+        end
+    elseif partSetting == "Root" then
+        local r = character:FindFirstChild("HumanoidRootPart") or character.PrimaryPart
+        if r and r:IsA("BasePart") and not r:GetAttribute("IsHitboxPart") then
+            table.insert(parts, r)
+        end
+    end
+
+    return parts
+end
 
 local function restoreTarget(target)
     local orig = originalProps[target]
@@ -3694,6 +3642,9 @@ local function restoreTarget(target)
             target.Material = orig.material
             target.CanCollide = orig.canCollide
             target.Massless = orig.massless
+            if orig.mesh and orig.mesh.Parent and orig.meshScale then
+                orig.mesh.Scale = orig.meshScale
+            end
         end)
     end
 end
@@ -3720,25 +3671,50 @@ end
 EXT.clearHitboxes = clearAll
 
 local function ensureWeldBox(target, s, size)
+    local targetCFrame = target.CFrame
+    local desiredShape = HITBOX_SHAPES[s.hitboxes_shape] or Enum.PartType.Ball
     local box = boxes[target]
+
     if box and box.Parent then
         box.Size = Vector3.new(size, size, size)
-        box.Shape = HITBOX_SHAPES[s.hitboxes_shape] or Enum.PartType.Ball
+        if box.Shape ~= desiredShape then
+            pcall(function() box.Shape = desiredShape end)
+        end
         if s.hitboxes_visualization then
             box.Transparency = s.hitboxes_transparency
             box.Color = s.hitboxes_color
+            box.Material = Enum.Material.Neon
         else
             box.Transparency = 1
         end
+        box.CanCollide = false
+        box.CanTouch = true
+        box.CanQuery = true
+        box.Massless = true
+
+        -- Проверяем наличие и целостность сварки
+        local weld = box:FindFirstChildOfClass("Weld")
+        if not weld or weld.Part0 ~= target or weld.Part1 ~= box then
+            if weld then weld:Destroy() end
+            weld = Instance.new("Weld")
+            weld.Name = "HitboxWeld"
+            weld.Part0 = target
+            weld.Part1 = box
+            weld.C0 = CFrame.new()
+            weld.C1 = CFrame.new()
+            weld.Parent = box
+        end
+        box.CFrame = targetCFrame
         return box
     end
 
     box = Instance.new("Part")
     box.Name = target.Name
-    box.Shape = HITBOX_SHAPES[s.hitboxes_shape] or Enum.PartType.Ball
+    box:SetAttribute("IsHitboxPart", true)
+    box.Shape = desiredShape
     box.Material = Enum.Material.Neon
     box.Size = Vector3.new(size, size, size)
-    box.CFrame = target.CFrame
+    box.CFrame = targetCFrame
     box.Anchored = false
     box.CanCollide = false
     box.Massless = true
@@ -3754,10 +3730,12 @@ local function ensureWeldBox(target, s, size)
         box.Transparency = 1
     end
 
-    local weld = Instance.new("WeldConstraint")
-    weld.Name = "MoonwareHitboxWeld"
-    weld.Part0 = box
-    weld.Part1 = target
+    local weld = Instance.new("Weld")
+    weld.Name = "HitboxWeld"
+    weld.Part0 = target
+    weld.Part1 = box
+    weld.C0 = CFrame.new()
+    weld.C1 = CFrame.new()
     weld.Parent = box
 
     box.Parent = target.Parent
@@ -3767,18 +3745,38 @@ end
 
 local function applyResize(target, s, size)
     if not originalProps[target] then
+        local mesh = target:FindFirstChildOfClass("SpecialMesh")
         originalProps[target] = {
             size = target.Size,
             transparency = target.Transparency,
             color = target.Color,
             material = target.Material,
             canCollide = target.CanCollide,
-            massless = target.Massless
+            massless = target.Massless,
+            mesh = mesh,
+            meshScale = mesh and mesh.Scale or nil
         }
     end
 
+    local orig = originalProps[target]
     pcall(function()
-        target.Size = Vector3.new(size, size, size)
+        -- Безопасный расчет размеров без проваливания под пол и левитации
+        local targetSize
+        if target.Name == "HumanoidRootPart" then
+            -- Расширяем по горизонтали (X, Z), а высоту Y ограничиваем, чтобы Root не доставал до пола и не поднимал модель в воздух
+            local safeY = math.clamp(orig.size.Y, 2, 4)
+            targetSize = Vector3.new(size, safeY, size)
+        elseif target.Name == "Head" then
+            -- Голова: ограничиваем высоту, чтобы не вылезала вниз за ноги
+            local safeY = math.clamp(size, orig.size.Y, 8)
+            targetSize = Vector3.new(size, safeY, size)
+        else
+            -- Торс / UpperTorso
+            local safeY = math.clamp(size, orig.size.Y, 6)
+            targetSize = Vector3.new(size, safeY, size)
+        end
+
+        target.Size = targetSize
         target.CanCollide = false
         target.Massless = true
 
@@ -3786,23 +3784,34 @@ local function applyResize(target, s, size)
             target.Transparency = s.hitboxes_transparency
             target.Color = s.hitboxes_color
             target.Material = Enum.Material.Neon
+            if orig.mesh and orig.meshScale then
+                orig.mesh.Scale = orig.meshScale
+            end
         else
-            local orig = originalProps[target]
-            if orig then
+            if target.Name == "HumanoidRootPart" then
+                target.Transparency = 1
+            else
                 target.Transparency = orig.transparency
                 target.Color = orig.color
                 target.Material = orig.material
+                -- Если у головы есть SpecialMesh, масштабируем меш обратно к исходному размеру, чтобы голова визуально оставалась нормальной
+                if orig.mesh and orig.meshScale then
+                    local sx = (orig.size.X * orig.meshScale.X) / math.max(targetSize.X, 0.001)
+                    local sy = (orig.size.Y * orig.meshScale.Y) / math.max(targetSize.Y, 0.001)
+                    local sz = (orig.size.Z * orig.meshScale.Z) / math.max(targetSize.Z, 0.001)
+                    orig.mesh.Scale = Vector3.new(sx, sy, sz)
+                end
             end
         end
     end)
 end
 
 local function shouldAffect(player, s, myPos)
-    if player == G.LP then return false end
+    if not player or player == G.LP then return false end
     if not player.Character then return false end
     if isFriend(player.Name) then return false end
 
-    if s.hitboxes_ignore_team and player.Team ~= nil and player.Team == G.LP.Team then
+    if s.hitboxes_ignore_team and isTeammate(player) then
         return false
     end
 
@@ -3814,6 +3823,7 @@ local function shouldAffect(player, s, myPos)
         if not myPos then return false end
         local root = player.Character:FindFirstChild("HumanoidRootPart")
             or player.Character.PrimaryPart
+            or player.Character:FindFirstChild("Head")
         if not root then return false end
         if (root.Position - myPos).Magnitude > limit then return false end
     end
@@ -3840,16 +3850,16 @@ function EXT.updateHitboxes()
 
     State.hitboxesActive = true
 
-    local names = HITBOX_TARGETS[s.hitboxes_part] or HITBOX_TARGETS.Head
+    local partSetting = s.hitboxes_part or "Head"
     local size = math.max(s.hitboxes_size or 1, 0.1)
-    local myRoot = G.LP.Character and G.LP.Character:FindFirstChild("HumanoidRootPart")
-    local myPos = myRoot and myRoot.Position or nil
+    local myRoot = G.LP.Character and (G.LP.Character:FindFirstChild("HumanoidRootPart") or G.LP.Character.PrimaryPart or G.LP.Character:FindFirstChild("Head"))
+    local myPos = myRoot and myRoot.Position or (workspace.CurrentCamera and workspace.CurrentCamera.CFrame.Position)
 
     local keep = {}
     for _, player in ipairs(G.Plr:GetPlayers()) do
         if shouldAffect(player, s, myPos) then
-            for _, name in ipairs(names) do
-                local target = player.Character:FindFirstChild(name)
+            local targets = getTargetParts(player.Character, partSetting)
+            for _, target in ipairs(targets) do
                 if target and target:IsA("BasePart") then
                     keep[target] = true
                     if currentMode == "Resize" then
@@ -5035,14 +5045,37 @@ function CategoryPanel:addSlider(moduleData, name, settingKey, min, max, inc)
     lbl.TextSize = 11
     lbl.TextXAlignment = Enum.TextXAlignment.Left
     
-    local valLbl = Instance.new("TextLabel", frame)
+    local valLbl = Instance.new("TextBox", frame)
     valLbl.Size = UDim2.new(0.5, -24, 0, 16)
     valLbl.Position = UDim2.new(0.5, 12, 0, 4)
     valLbl.BackgroundTransparency = 1
+    valLbl.BorderSizePixel = 0
     valLbl.TextColor3 = THEME.TEXT_DIM
     valLbl.Font = Enum.Font.Gotham
     valLbl.TextSize = 11
     valLbl.TextXAlignment = Enum.TextXAlignment.Right
+    valLbl.ClearTextOnFocus = false
+    valLbl.TextEditable = true
+    valLbl.Active = true
+    valLbl.ClipsDescendants = false
+    valLbl.PlaceholderText = ""
+    valLbl.ZIndex = 5
+    
+    valLbl.MouseEnter:Connect(function()
+        if not valLbl:IsFocused() then
+            tw(valLbl, {TextColor3 = THEME.TEXT_TITLE}, 0.15)
+        end
+    end)
+    
+    valLbl.MouseLeave:Connect(function()
+        if not valLbl:IsFocused() then
+            tw(valLbl, {TextColor3 = THEME.TEXT_DIM}, 0.15)
+        end
+    end)
+    
+    valLbl.Focused:Connect(function()
+        tw(valLbl, {TextColor3 = getClientColor()}, 0.15)
+    end)
     
     local track = Instance.new("TextButton", frame)
     track.Size = UDim2.new(1, -24, 0, 4)
@@ -5074,11 +5107,33 @@ function CategoryPanel:addSlider(moduleData, name, settingKey, min, max, inc)
         valueFormat = "%.1f"
     end
 
-    local function applySliderValue(value)
+    local function applySliderValue(value, forceText)
         getgenv().aim_settings[settingKey] = value
-        valLbl.Text = string.format(valueFormat, value)
+        if forceText or dragging or not valLbl:IsFocused() then
+            valLbl.Text = string.format(valueFormat, value)
+        end
         tw(fill, {Size = UDim2.new(math.clamp((value - min) / (max - min), 0, 1), 0, 1, 0)}, 0.1)
     end
+
+    valLbl.FocusLost:Connect(function(enterPressed)
+        tw(valLbl, {TextColor3 = THEME.TEXT_DIM}, 0.15)
+        local rawText = valLbl.Text:gsub(",", ".")
+        local num = tonumber(rawText)
+        if num then
+            if inc < 0.1 then
+                num = math.floor(num * 100 + 0.5) / 100
+            elseif inc < 1 then
+                num = math.floor(num * 10 + 0.5) / 10
+            else
+                num = math.floor(num + 0.5)
+            end
+            num = math.clamp(num, min, max)
+            applySliderValue(num, true)
+        else
+            local currentVal = getgenv().aim_settings[settingKey] or min
+            valLbl.Text = string.format(valueFormat, currentVal)
+        end
+    end)
 
     -- Шаг отсчитывается от нуля, а не от минимума: так значения выходят
     -- круглыми (260, 265, 270), а не привязанными к произвольному началу шкалы.
@@ -5128,7 +5183,7 @@ function CategoryPanel:addSlider(moduleData, name, settingKey, min, max, inc)
         applySliderValue(getgenv().aim_settings[settingKey])
     end)
     
-    local startVal = getgenv().aim_settings[settingKey]
+    local startVal = getgenv().aim_settings[settingKey] or min
     valLbl.Text = string.format(valueFormat, startVal)
     fill.Size = UDim2.new(math.clamp((startVal - min) / (max - min), 0, 1), 0, 1, 0)
     
@@ -5584,7 +5639,7 @@ function EXT.updateEspDrawings()
         local humanoid = character and character:FindFirstChildOfClass("Humanoid")
         local show = player ~= G.LP and root ~= nil and humanoid ~= nil and humanoid.Health > 0
 
-        if show and s.esp_hide_team and G.LP.Team and player.Team == G.LP.Team then
+        if show and s.esp_hide_team and isTeammate(player) then
             show = false
         end
 
@@ -5672,7 +5727,9 @@ EXT.PANIC_KEYS = {
     "air_stuck_enabled", "smooth_fall_enabled", "speed_enabled", "safe_walk_enabled",
     "fly_enabled", "clumsy_enabled", "freecam_enabled", "noclip_enabled", "anti_fling",
     "fullbright", "always_day", "world_tweaks_enabled", "hitboxes_enabled",
-    "viewmodel_enabled", "esp_chams", "esp_glow_chams"
+    "viewmodel_enabled", "esp_chams", "esp_glow_chams", "esp_nametags", "esp_distance",
+    "esp_hp_bar", "esp_tool", "esp_labels_team_check", "esp_chams_team_check",
+    "mouse_glow", "click_action", "friends_window", "hud_arraylist"
 }
 
 function EXT.panic()
@@ -6703,7 +6760,7 @@ Instance.new("UICorner", body).CornerRadius = UDim.new(1, 0)
 local bodyGradient = Instance.new("UIGradient", body)
 bodyGradient.Rotation = 90
 
--- Светлая кромка с переменной прозрачностью — имитация преломления по краю
+-- Светлая кромка с переменной прозрачностью - имитация преломления по краю
 local rim = Instance.new("UIStroke", body)
 rim.Color = Color3.fromRGB(255, 255, 255)
 rim.Thickness = 1.4
@@ -6803,7 +6860,7 @@ function EXT.updateMouseGlow(dt)
     local base = (s.mouse_glow_size or 40) * amount
     local liquid = s.mouse_glow_style == "Liquid Glass"
 
-    -- Разные частоты по осям дают лёгкую «жидкую» деформацию капли
+    -- Разные частоты по осям дают легкую "жидкую" деформацию капли
     local wobbleX, wobbleY = 1, 1
     if liquid then
         wobbleX = 1 + math.sin(tick() * 2.3) * 0.06
@@ -7148,9 +7205,8 @@ end
 -- Включает:
 -- 3.1 Сборка категорий меню: Combat, Visuals, Movement, Misc, Config
 -- 3.2 Менеджер конфигураций (сохранение/загрузка конфигов в JSON)
--- 3.3 Панель чата (Chat panel)
--- 3.4 Главные циклы RunService (Heartbeat, RenderStepped)
--- 3.5 Обработчики клавиш и автозапуск скрипта
+-- 3.3 Главные циклы RunService (Heartbeat, RenderStepped)
+-- 3.4 Обработчики клавиш и автозапуск скрипта
 
 do
 State.moduleIndex = {}
@@ -7221,6 +7277,7 @@ pVisuals:addSection(M.ESP, "Chams")
 pVisuals:addBoolean(M.ESP, "Chams", "esp_chams")
 pVisuals:addBoolean(M.ESP, "Glow Chams", "esp_glow_chams")
 pVisuals:addBoolean(M.ESP, "Chams Outline", "esp_chams_outline")
+pVisuals:addBoolean(M.ESP, "Check Team", "esp_chams_team_check")
 pVisuals:addColorPicker(M.ESP, "Chams Color", "esp_chams_color")
 
 pVisuals:addSection(M.ESP, "Boxes & Tracers")
@@ -7233,6 +7290,7 @@ pVisuals:addBoolean(M.ESP, "NameTags", "esp_nametags")
 pVisuals:addBoolean(M.ESP, "HP Bar", "esp_hp_bar")
 pVisuals:addBoolean(M.ESP, "Tool", "esp_tool")
 pVisuals:addBoolean(M.ESP, "Distance", "esp_distance")
+pVisuals:addBoolean(M.ESP, "Check Team", "esp_labels_team_check")
 
 pVisuals:addSection(M.ESP, "Filters")
 pVisuals:addSlider(M.ESP, "Max Distance", "esp_max_distance", 100, 5000, 50)
@@ -7423,7 +7481,6 @@ pMisc:addSlider(M.Notify, "Speed", "notification_speed", 0.05, 0.6, 0.01)
 pMisc:addBoolean(M.Notify, "Module Toggles", "notification_modules")
 pMisc:addModule("FullBright", "fullbright", false)
 pMisc:addModule("Always Day", "always_day", false)
-pMisc:addModule("Chat", "chat_enabled", false)
 M.Unload = pMisc:addModule("Unload Script", "unload_script", false)
 table.insert(State.panels, pMisc)
 
@@ -7541,42 +7598,6 @@ local function snapshotConfigData()
     return runtimeData, serializedData
 end
 
-local function reloadConfigsFromDisk()
-    configList = {}
-    
-    if not ensureConfigFolder() then
-        return false, "Exploit filesystem API недоступен"
-    end
-    
-    local ok, files = pcall(listfiles, CONFIG_FOLDER)
-    if not ok or type(files) ~= "table" then
-        return false, "Не удалось прочитать папку конфигов"
-    end
-    
-    for _, path in ipairs(files) do
-        local encodedName = tostring(path):match("([^/\\]+)%.json$")
-        if encodedName then
-            local readOk, raw = pcall(readfile, path)
-            if readOk and type(raw) == "string" and raw ~= "" then
-                local decodeOk, payload = pcall(function()
-                    return G.Http:JSONDecode(raw)
-                end)
-                
-                if decodeOk and type(payload) == "table" then
-                    configList[encodedName] = {
-                        name = payload.name or decodeConfigName(encodedName) or encodedName,
-                        data = deserializeConfigValue(payload.data or {}),
-                        timestamp = payload.timestamp or os.time(),
-                        path = path
-                    }
-                end
-            end
-        end
-    end
-    
-    return true
-end
-
 -- Функция для кодирования имени конфига
 local function encodeConfigName(name)
     local encoded = "moonware_"
@@ -7607,114 +7628,12 @@ local function decodeConfigName(encoded)
     return decoded
 end
 
--- Функция для сохранения конфига
-local function saveConfig(name)
-    if not name or name:gsub("%s", "") == "" then
-        return false, "Имя конфига не может быть пустым"
-    end
-    
-    local encodedName = encodeConfigName(name)
-    local configData = {}
-    
-    -- Сохраняем все настройки из aim_settings
-    for key, value in pairs(getgenv().aim_settings) do
-        if key ~= "running" and key ~= "friends" and key ~= "config_name" then
-            configData[key] = value
-        end
-    end
-
-    configData.hotkeys = cloneHotkeys(getgenv().aim_settings.hotkeys)
-    
-    configList[encodedName] = {
-        name = name,
-        data = configData,
-        timestamp = os.time()
-    }
-    
-    return true, "Конфиг '" .. name .. "' сохранен"
-end
-
--- Функция для загрузки конфига
-local function loadConfig(encodedName)
-    if not configList[encodedName] then
-        return false, "Конфиг не найден"
-    end
-    
-    local config = configList[encodedName]
-    
-    -- Загружаем настройки
-    for key, value in pairs(config.data) do
-        if key == "hotkeys" then
-            -- Правильно десериализуем hotkeys
-            local deserializedHotkeys = {}
-            for hotkeyKey, hotkeyValue in pairs(value) do
-                -- Если это уже EnumItem, используем как есть
-                if typeof(hotkeyValue) == "EnumItem" then
-                    deserializedHotkeys[hotkeyKey] = hotkeyValue
-                -- Если это таблица с __type, десериализуем
-                elseif type(hotkeyValue) == "table" and hotkeyValue.__type == "EnumItem" then
-                    local enumTypeName = tostring(hotkeyValue.enumType or ""):match("^Enum%.(.+)$")
-                    local enumObject = enumTypeName and Enum[enumTypeName]
-                    deserializedHotkeys[hotkeyKey] = (enumObject and enumObject[hotkeyValue.name]) or Enum.KeyCode.Unknown
-                -- Если это строка, пытаемся конвертировать
-                elseif type(hotkeyValue) == "string" then
-                    local keyName = hotkeyValue:match("^Enum%.KeyCode%.(.+)$") or hotkeyValue
-                    deserializedHotkeys[hotkeyKey] = Enum.KeyCode[keyName] or Enum.KeyCode.Unknown
-                else
-                    deserializedHotkeys[hotkeyKey] = Enum.KeyCode.Unknown
-                end
-            end
-            getgenv().aim_settings.hotkeys = deserializedHotkeys
-        elseif key == "clickgui_bind" then
-            -- НЕ загружаем clickgui_bind из конфига - оставляем текущий
-            -- Пропускаем этот ключ
-        elseif getgenv().aim_settings[key] ~= nil then
-            getgenv().aim_settings[key] = value
-        end
-    end
-
-    getgenv().aim_settings.config_name = config.name
-    refreshUIFromSettings()
-    updateAllColors()
-    
-    return true, "Конфиг '" .. config.name .. "' загружен"
-end
-
--- Функция для удаления конфига
-local function deleteConfig(encodedName)
-    if not configList[encodedName] then
-        return false, "Конфиг не найден"
-    end
-    
-    local configName = configList[encodedName].name
-    configList[encodedName] = nil
-    return true, "Конфиг '" .. configName .. "' удален"
-end
-
--- Функция для получения списка конфигов
-local function getConfigsList()
-    local configs = {}
-    for encodedName, config in pairs(configList) do
-        table.insert(configs, {
-            encoded = encodedName,
-            name = config.name,
-            timestamp = config.timestamp
-        })
-    end
-    
-    -- Сортируем по времени создания
-    table.sort(configs, function(a, b)
-        return a.timestamp > b.timestamp
-    end)
-    
-    return configs
-end
-
 -- Добавляем элементы в категорию Config
 -- TextBox для имени конфига
 pConfig:addTextBox("Config Name", "config_name", "Enter name...")
 
 local updateConfigList
+local reloadConfigsFromDisk, saveConfig, loadConfig, deleteConfig, getConfigsList
 
 -- Кнопки управления
 reloadConfigsFromDisk = function()
@@ -8039,8 +7958,7 @@ end)
 
 table.insert(State.panels, pConfig)
 
--- Создаем тестовые конфиги
--- 6. CHAT PANEL (простой чат в левом нижнем углу)
+-- Автозагрузка конфига по умолчанию
 task.spawn(function()
     task.wait(1.2)
     reloadConfigsFromDisk()
@@ -8055,346 +7973,6 @@ task.spawn(function()
     end
 end)
 end
-
-ChatPanel = Instance.new("Frame", ScreenGui)
-ChatPanel.Name = "ChatPanel"
-ChatPanel.Size = UDim2.new(0, 350, 0, 400)
-ChatPanel.Position = UDim2.new(0, 20, 1, -420)
-ChatPanel.BackgroundColor3 = THEME.PANEL_BG
-ChatPanel.BorderSizePixel = 0
-ChatPanel.Visible = false -- Скрыт по умолчанию
-
-Instance.new("UICorner", ChatPanel).CornerRadius = UDim.new(0, 12)
-
-chatPanelStroke = Instance.new("UIStroke", ChatPanel)
-chatPanelStroke.Color = THEME.PANEL_STROKE
-chatPanelStroke.Thickness = 2
-
--- Заголовок чата
-ChatHeader = Instance.new("Frame", ChatPanel)
-ChatHeader.Size = UDim2.new(1, 0, 0, 40)
-ChatHeader.BackgroundColor3 = Color3.fromRGB(25, 25, 30)
-ChatHeader.BorderSizePixel = 0
-
-chatHeaderCorner = Instance.new("UICorner", ChatHeader)
-chatHeaderCorner.CornerRadius = UDim.new(0, 12)
-
-ChatTitle = Instance.new("TextLabel", ChatHeader)
-ChatTitle.Size = UDim2.new(1, -80, 1, 0)
-ChatTitle.Position = UDim2.new(0, 15, 0, 0)
-ChatTitle.BackgroundTransparency = 1
-ChatTitle.Text = "Global Chat"
-ChatTitle.TextColor3 = THEME.TEXT_TITLE
-ChatTitle.Font = Enum.Font.GothamBold
-ChatTitle.TextSize = 16
-ChatTitle.TextXAlignment = Enum.TextXAlignment.Left
-
--- Кнопка скрыть/показать
-ChatToggle = Instance.new("TextButton", ChatHeader)
-ChatToggle.Size = UDim2.new(0, 30, 0, 30)
-ChatToggle.Position = UDim2.new(1, -35, 0.5, -15)
-ChatToggle.BackgroundColor3 = Color3.fromRGB(60, 60, 70)
-ChatToggle.Text = "−"
-ChatToggle.TextColor3 = Color3.fromRGB(255, 255, 255)
-ChatToggle.Font = Enum.Font.GothamBold
-ChatToggle.TextSize = 16
-ChatToggle.AutoButtonColor = false
-
-chatToggleCorner = Instance.new("UICorner", ChatToggle)
-chatToggleCorner.CornerRadius = UDim.new(0, 6)
-
--- Область сообщений
-ChatMessages = Instance.new("ScrollingFrame", ChatPanel)
-ChatMessages.Size = UDim2.new(1, -10, 1, -90)
-ChatMessages.Position = UDim2.new(0, 5, 0, 45)
-ChatMessages.BackgroundTransparency = 1
-ChatMessages.BorderSizePixel = 0
-ChatMessages.ScrollBarThickness = 4
-ChatMessages.ScrollBarImageColor3 = Color3.fromRGB(80, 80, 80)
-ChatMessages.CanvasSize = UDim2.new(0, 0, 0, 0)
-
-chatMessagesLayout = Instance.new("UIListLayout", ChatMessages)
-chatMessagesLayout.SortOrder = Enum.SortOrder.LayoutOrder
-chatMessagesLayout.Padding = UDim.new(0, 5)
-
--- Поле ввода
-ChatInputFrame = Instance.new("Frame", ChatPanel)
-ChatInputFrame.Size = UDim2.new(1, -10, 0, 35)
-ChatInputFrame.Position = UDim2.new(0, 5, 1, -40)
-ChatInputFrame.BackgroundColor3 = THEME.MODULE_BG
-ChatInputFrame.BorderSizePixel = 0
-
-chatInputCorner = Instance.new("UICorner", ChatInputFrame)
-chatInputCorner.CornerRadius = UDim.new(0, 8)
-
-ChatInput = Instance.new("TextBox", ChatInputFrame)
-ChatInput.Size = UDim2.new(1, -70, 1, -6)
-ChatInput.Position = UDim2.new(0, 8, 0, 3)
-ChatInput.BackgroundTransparency = 1
-ChatInput.Text = ""
-ChatInput.PlaceholderText = "Type a message..."
-ChatInput.TextColor3 = THEME.TEXT_TITLE
-ChatInput.PlaceholderColor3 = THEME.TEXT_DIM
-ChatInput.Font = Enum.Font.Gotham
-ChatInput.TextSize = 12
-ChatInput.TextXAlignment = Enum.TextXAlignment.Left
-
-ChatSendBtn = Instance.new("TextButton", ChatInputFrame)
-ChatSendBtn.Size = UDim2.new(0, 55, 1, -6)
-ChatSendBtn.Position = UDim2.new(1, -58, 0, 3)
-ChatSendBtn.BackgroundColor3 = getClientColor()
-ChatSendBtn.Text = "Send"
-ChatSendBtn.TextColor3 = Color3.fromRGB(255, 255, 255)
-ChatSendBtn.Font = Enum.Font.GothamBold
-ChatSendBtn.TextSize = 11
-ChatSendBtn.AutoButtonColor = false
-
-chatSendCorner = Instance.new("UICorner", ChatSendBtn)
-chatSendCorner.CornerRadius = UDim.new(0, 6)
-
--- Переменные для чата
-chatMessages = {}
-chatVisible = false
-
--- Функция для добавления сообщения в чат
-local function addChatMessage(username, message, isOwn, timestamp)
-    local messageFrame = Instance.new("Frame", ChatMessages)
-    messageFrame.Size = UDim2.new(1, -10, 0, 0) -- Высота будет автоматически подогнана
-    messageFrame.BackgroundTransparency = 1
-    messageFrame.LayoutOrder = #chatMessages + 1
-    
-    -- Определяем цвет и выравнивание
-    local messageColor = isOwn and getClientColor() or THEME.MODULE_BG
-    local textAlign = isOwn and Enum.TextXAlignment.Right or Enum.TextXAlignment.Left
-    
-    -- Создаем текст сообщения
-    local messageText = Instance.new("TextLabel", messageFrame)
-    messageText.Size = UDim2.new(1, 0, 0, 0)
-    messageText.BackgroundColor3 = messageColor
-    messageText.BorderSizePixel = 0
-    messageText.Text = (isOwn and "" or username .. ": ") .. message
-    messageText.TextColor3 = Color3.fromRGB(255, 255, 255)
-    messageText.Font = Enum.Font.Gotham
-    messageText.TextSize = 11
-    messageText.TextXAlignment = textAlign
-    messageText.TextYAlignment = Enum.TextYAlignment.Top
-    messageText.TextWrapped = true
-    
-    local messageCorner = Instance.new("UICorner", messageText)
-    messageCorner.CornerRadius = UDim.new(0, 8)
-    
-    local messagePadding = Instance.new("UIPadding", messageText)
-    messagePadding.PaddingLeft = UDim.new(0, 8)
-    messagePadding.PaddingRight = UDim.new(0, 8)
-    messagePadding.PaddingTop = UDim.new(0, 4)
-    messagePadding.PaddingBottom = UDim.new(0, 4)
-    
-    -- Вычисляем высоту текста
-    local textBounds = game:GetService("TextService"):GetTextSize(
-        messageText.Text,
-        messageText.TextSize,
-        messageText.Font,
-        Vector2.new(messageText.AbsoluteSize.X - 16, math.huge)
-    )
-    
-    local messageHeight = math.max(25, textBounds.Y + 8)
-    messageFrame.Size = UDim2.new(1, -10, 0, messageHeight)
-    messageText.Size = UDim2.new(1, 0, 1, 0)
-    
-    -- Позиционируем сообщение
-    if isOwn then
-        messageText.Position = UDim2.new(0.3, 0, 0, 0)
-        messageText.Size = UDim2.new(0.7, -5, 1, 0)
-    else
-        messageText.Position = UDim2.new(0, 0, 0, 0)
-        messageText.Size = UDim2.new(0.7, 0, 1, 0)
-    end
-    
-    -- Сохраняем данные сообщения с timestamp
-    local msgData = {
-        frame = messageFrame, 
-        text = messageText, 
-        timestamp = timestamp or os.time(),
-        username = username,
-        message = message,
-        isOwn = isOwn
-    }
-    table.insert(chatMessages, msgData)
-    
-    -- Обновляем размер canvas и прокручиваем вниз
-    ChatMessages.CanvasSize = UDim2.new(0, 0, 0, chatMessagesLayout.AbsoluteContentSize.Y)
-    ChatMessages.CanvasPosition = Vector2.new(0, ChatMessages.AbsoluteCanvasSize.Y)
-end
-
--- Функция отправки сообщения (мгновенная)
-local function sendChatMessage()
-    if not getgenv().aim_settings.chat_enabled then return end -- Проверяем настройку
-    
-    local message = ChatInput.Text:gsub("^%s*(.-)%s*$", "%1") -- Убираем пробелы
-    if message ~= "" then
-        -- Добавляем сообщение локально сразу
-        addChatMessage(G.LP.Name, message, true, os.time())
-        
-        -- Очищаем поле ввода
-        ChatInput.Text = ""
-        
-        -- Отправляем на сервер в фоне (без ожидания)
-        task.spawn(function()
-            sendMessage(message)
-            -- Через секунду проверяем новые сообщения для синхронизации
-            task.wait(1)
-            if chatVisible and getgenv().aim_settings.chat_enabled then
-                loadServerMessages()
-            end
-        end)
-    end
-end
-
--- События для чата
-ChatSendBtn.MouseButton1Click:Connect(sendChatMessage)
-ChatInput.FocusLost:Connect(function(enterPressed)
-    if enterPressed then
-        sendChatMessage()
-    end
-end)
-
--- Переключение видимости чата
-ChatToggle.MouseButton1Click:Connect(function()
-    -- Проверяем, включен ли чат в настройках
-    if not getgenv().aim_settings.chat_enabled then
-        return -- Не позволяем переключать если чат выключен в настройках
-    end
-    
-    chatVisible = not chatVisible
-    ChatPanel.Visible = chatVisible
-    ChatToggle.Text = chatVisible and "−" or "+"
-    
-    -- Загружаем сообщения при открытии чата
-    if chatVisible and #chatMessages == 0 then
-        loadAllMessages()
-    end
-end)
-
--- Показываем чат при открытии меню
-local originalAnimatePanels = animatePanels
-animatePanels = function(show)
-    originalAnimatePanels(show)
-    if show and getgenv().aim_settings.chat_enabled then
-        ChatPanel.Visible = true
-        chatVisible = true
-        ChatToggle.Text = "−"
-        -- Загружаем все сообщения при первом открытии
-        if #chatMessages == 0 then
-            loadAllMessages()
-        end
-    else
-        ChatPanel.Visible = false
-        chatVisible = false
-    end
-end
-
--- Функция для загрузки сообщений с сервера
-function loadServerMessages()
-    if not chatVisible or not getgenv().aim_settings.chat_enabled then return end
-    
-    task.spawn(function()
-        local serverMessages = fetchMessages()
-        if not serverMessages then return end
-        
-        -- Фильтруем только глобальные сообщения
-        local globalMessages = {}
-        for _, msg in pairs(serverMessages) do
-            if not msg.chat or msg.chat == "global" then
-                table.insert(globalMessages, msg)
-            end
-        end
-        
-        -- Сортируем по времени
-        table.sort(globalMessages, function(a, b)
-            return (a.timestamp or 0) < (b.timestamp or 0)
-        end)
-        
-        -- Проверяем, есть ли новые сообщения
-        local lastMessageTime = 0
-        if #chatMessages > 0 then
-            -- Находим время последнего сообщения
-            for _, msgData in pairs(chatMessages) do
-                if msgData.timestamp and msgData.timestamp > lastMessageTime then
-                    lastMessageTime = msgData.timestamp
-                end
-            end
-        end
-        
-        -- Добавляем только новые сообщения
-        local newMessagesAdded = false
-        for _, msg in pairs(globalMessages) do
-            local msgTime = msg.timestamp or 0
-            if msgTime > lastMessageTime then
-                local isOwn = msg.userid == G.LP.UserId
-                -- Добавляем все новые сообщения (включая свои с сервера для синхронизации)
-                addChatMessage(msg.username or "Unknown", msg.message or "", isOwn, msgTime)
-                newMessagesAdded = true
-            end
-        end
-        
-        -- Если добавили новые сообщения, прокручиваем вниз
-        if newMessagesAdded then
-            ChatMessages.CanvasPosition = Vector2.new(0, ChatMessages.AbsoluteCanvasSize.Y)
-        end
-    end)
-end
-
--- Функция для первоначальной загрузки всех сообщений
-function loadAllMessages()
-    if not chatVisible or not getgenv().aim_settings.chat_enabled then return end
-    
-    task.spawn(function()
-        local serverMessages = fetchMessages()
-        if not serverMessages then return end
-        
-        -- Очищаем старые сообщения
-        for _, msgData in pairs(chatMessages) do
-            if msgData.frame and msgData.frame.Parent then
-                msgData.frame:Destroy()
-            end
-        end
-        chatMessages = {}
-        
-        -- Фильтруем только глобальные сообщения
-        local globalMessages = {}
-        for _, msg in pairs(serverMessages) do
-            if not msg.chat or msg.chat == "global" then
-                table.insert(globalMessages, msg)
-            end
-        end
-        
-        -- Сортируем по времени
-        table.sort(globalMessages, function(a, b)
-            return (a.timestamp or 0) < (b.timestamp or 0)
-        end)
-        
-        -- Показываем только последние 50 сообщений для производительности
-        local startIndex = math.max(1, #globalMessages - 49)
-        for i = startIndex, #globalMessages do
-            local msg = globalMessages[i]
-            local isOwn = msg.userid == G.LP.UserId
-            addChatMessage(msg.username or "Unknown", msg.message or "", isOwn, msg.timestamp)
-        end
-        
-        -- Прокручиваем вниз
-        ChatMessages.CanvasPosition = Vector2.new(0, ChatMessages.AbsoluteCanvasSize.Y)
-    end)
-end
-
--- Быстрое обновление сообщений (каждые 3 секунды)
-task.spawn(function()
-    while getgenv().aim_settings.running do
-        task.wait(3)
-        if chatVisible and getgenv().aim_settings.chat_enabled then
-            loadServerMessages()
-        end
-    end
-end)
 
 -- Сохраняем оригинальные позиции панелей и устанавливаем начальные позиции внизу экрана
 for i, panel in ipairs(State.panels) do
@@ -8459,21 +8037,6 @@ local function updateGUIVisibility()
                     module.container.Visible = isTrollface
                 end
             end
-        end
-    end
-    
-    -- Update Chat visibility
-    local shouldShowChat = getgenv().aim_settings.chat_enabled
-    if ChatPanel.Visible ~= shouldShowChat then
-        ChatPanel.Visible = shouldShowChat
-        chatVisible = shouldShowChat
-        if shouldShowChat then
-            ChatToggle.Text = "−"
-            if #chatMessages == 0 then
-                loadAllMessages()
-            end
-        else
-            ChatToggle.Text = "+"
         end
     end
 end
@@ -8582,6 +8145,8 @@ State.connections.mainLoop = G.RS.RenderStepped:Connect(function()
     local t = tick()
     local dt = t - renderState.lastFrameTime
     renderState.lastFrameTime = t
+    
+    State.watermark.frameCount = (State.watermark.frameCount or 0) + 1
     
     updatePanelAnimation(dt)
     
@@ -9014,15 +8579,32 @@ State.connections.mainLoop = G.RS.RenderStepped:Connect(function()
         if character and character.Parent and (p ~= G.LP or getgenv().aim_settings.esp_self) then
             local isLocalPlayer = p == G.LP
             local isFriendPlayer = isFriend(p.Name)
+            local isTeam = not isLocalPlayer and isTeammate(p)
             local shouldHide = false
 
-            if getgenv().aim_settings.esp_hide_team and not isLocalPlayer and G.LP.Team and p.Team == G.LP.Team then
+            if getgenv().aim_settings.esp_hide_team and isTeam then
                 shouldHide = true
             end
 
+            -- Проверка ограничения дистанции Max Distance
+            local maxDistance = getgenv().aim_settings.esp_max_distance
+            if not isLocalPlayer and maxDistance and maxDistance > 0 then
+                local cam = workspace.CurrentCamera or G.Cam
+                local targetPart = character:FindFirstChild("HumanoidRootPart") or character.PrimaryPart or entry.head
+                if cam and targetPart then
+                    local dist = (targetPart.Position - cam.CFrame.Position).Magnitude
+                    if dist > maxDistance then
+                        shouldHide = true
+                    end
+                end
+            end
+
+            local hideChams = shouldHide or (getgenv().aim_settings.esp_chams_team_check and isTeam)
+            local hideLabels = shouldHide or (getgenv().aim_settings.esp_labels_team_check and isTeam)
+
             local hl = entry.highlight
             if hl then
-                hl.Enabled = getgenv().aim_settings.esp_enabled and getgenv().aim_settings.esp_chams and not shouldHide
+                hl.Enabled = getgenv().aim_settings.esp_enabled and getgenv().aim_settings.esp_chams and not hideChams
                 if getgenv().aim_settings.esp_team_color and p.Team then
                     hl.FillColor = p.Team.TeamColor.Color
                 else
@@ -9037,7 +8619,7 @@ State.connections.mainLoop = G.RS.RenderStepped:Connect(function()
                     hl.OutlineTransparency = 1
                 end
 
-                if getgenv().aim_settings.esp_enabled and getgenv().aim_settings.esp_glow_chams and not shouldHide then
+                if getgenv().aim_settings.esp_enabled and getgenv().aim_settings.esp_glow_chams and not hideChams then
                     addAuraChams(character, hl.FillColor)
                 else
                     clearAuraChams(character)
@@ -9055,7 +8637,7 @@ State.connections.mainLoop = G.RS.RenderStepped:Connect(function()
                     or getgenv().aim_settings.esp_tool
                     or getgenv().aim_settings.esp_distance
 
-                billboardGui.Enabled = getgenv().aim_settings.esp_enabled and not shouldHide and shouldShowText
+                billboardGui.Enabled = getgenv().aim_settings.esp_enabled and not hideLabels and shouldShowText
 
                 local hum = character:FindFirstChildOfClass("Humanoid")
                 if hum and G.Cam and G.Cam.CFrame then
@@ -9525,45 +9107,39 @@ State.connections.mainLoop = G.RS.RenderStepped:Connect(function()
     if getgenv().aim_settings.hud_enabled and getgenv().aim_settings.watermark_enabled then
         local currentTime = tick()
         
-        -- Обновляем FPS и Ping раз в секунду
-        if currentTime - State.watermark.lastUpdateTime >= 1.0 then
+        -- Обновляем FPS и Ping каждые 0.5 сек (максимально точно и без задержек)
+        if currentTime - State.watermark.lastUpdateTime >= 0.5 then
+            local elapsed = currentTime - (State.watermark.lastFPSTime or currentTime)
+            if elapsed <= 0 then elapsed = 0.5 end
+            
+            -- Реальный FPS: точное количество фактически отрисованных кадров делённое на прошедшее время
+            local measuredFPS = math.round((State.watermark.frameCount or 0) / elapsed)
+            State.watermark.frameCount = 0
+            State.watermark.lastFPSTime = currentTime
             State.watermark.lastUpdateTime = currentTime
             
-            -- Получаем новые значения
-            local newFPS = math.floor(1 / dt)
-            local newPing = math.floor(game:GetService("Stats").Network.ServerStatsItem["Data Ping"]:GetValue())
-            
-            -- Запускаем анимацию только если значения изменились
-            if newFPS ~= State.watermark.currentFPS then
-                State.watermark.currentFPS = newFPS
-                State.watermark.fpsAnimProgress = 0
+            if measuredFPS > 0 then
+                State.watermark.currentFPS = measuredFPS
             end
             
-            if newPing ~= State.watermark.currentPing then
-                State.watermark.currentPing = newPing
-                State.watermark.pingAnimProgress = 0
+            -- Реальный пинг Роблокса
+            local measuredPing = getRobloxPingMs()
+            if measuredPing > 0 then
+                State.watermark.currentPing = measuredPing
             end
+            
+            State.watermark.displayFPS = State.watermark.currentFPS
+            State.watermark.displayPing = State.watermark.currentPing
+            
+            -- Мгновенно обновляем текст с реальными показателями
+            FPSLabel.Text = State.watermark.displayFPS .. "fps"
+            PingLabel.Text = State.watermark.displayPing .. "ms"
+            
+            -- Метрики подсвечиваются: зелёный хорошо, жёлтый средне, красный плохо
+            FPSLabel.TextColor3 = EXT.metricColor(-State.watermark.displayFPS, -100, -30)
+            PingLabel.TextColor3 = EXT.metricColor(State.watermark.displayPing, 80, 200)
         end
         
-        -- Обновляем прогресс анимации (быстро в начале, медленно в конце)
-        local animSpeed = 3.0 -- Скорость анимации
-        if State.watermark.fpsAnimProgress < 1 then
-            State.watermark.fpsAnimProgress = math.min(State.watermark.fpsAnimProgress + dt * animSpeed, 1)
-        end
-        if State.watermark.pingAnimProgress < 1 then
-            State.watermark.pingAnimProgress = math.min(State.watermark.pingAnimProgress + dt * animSpeed, 1)
-        end
-        
-        -- Анимируем отображаемые значения
-        State.watermark.displayFPS = animateNumber(State.watermark.displayFPS, State.watermark.currentFPS, State.watermark.fpsAnimProgress)
-        State.watermark.displayPing = animateNumber(State.watermark.displayPing, State.watermark.currentPing, State.watermark.pingAnimProgress)
-        
-        -- Обновляем текст с анимированными значениями
-        FPSLabel.Text = State.watermark.displayFPS .. "fps"
-        PingLabel.Text = State.watermark.displayPing .. "ms"
-        -- Метрики подсвечиваются: зелёный хорошо, жёлтый средне, красный плохо
-        FPSLabel.TextColor3 = EXT.metricColor(-State.watermark.displayFPS, -100, -30)
-        PingLabel.TextColor3 = EXT.metricColor(State.watermark.displayPing, 80, 200)
         NickLabel.Text = G.LP.Name .. " · " .. EXT.formatSession()
         
         -- Вращающийся градиент
@@ -10422,49 +9998,12 @@ State.connections.mainLoop = G.RS.RenderStepped:Connect(function()
     
     -- Unload Script Logic
     if getgenv().aim_settings.unload_script then
-        -- Отключаем все функции перед выгрузкой
-        getgenv().aim_settings.enabled = false
-        getgenv().aim_settings.esp_enabled = false
-        getgenv().aim_settings.target_esp = false
-        getgenv().aim_settings.target_hud = false
-        getgenv().aim_settings.friend_markers = false
-        getgenv().aim_settings.arrows = false
-        getgenv().aim_settings.rainbow_fov = false
-        getgenv().aim_settings.rainbow_crosshair = false
-        getgenv().aim_settings.jump_circle_enabled = false
-        getgenv().aim_settings.clickgui_enabled = false
-        getgenv().aim_settings.cosmetic_enabled = false
-        getgenv().aim_settings.china_hat = false
-        getgenv().aim_settings.china_hat_friends = false
-        getgenv().aim_settings.aura_enabled = false
-        getgenv().aim_settings.trails_enabled = false
-        getgenv().aim_settings.tp_walk_enabled = false
-        getgenv().aim_settings.target_strafe_enabled = false
-        getgenv().aim_settings.orbit_enabled = false
-        getgenv().aim_settings.target_strafe_predicted_pos = false
-        getgenv().aim_settings.infinite_jump_enabled = false
-        getgenv().aim_settings.spider_enabled = false
-        getgenv().aim_settings.air_stuck_enabled = false
-        getgenv().aim_settings.smooth_fall_enabled = false
-        getgenv().aim_settings.speed_enabled = false
-        getgenv().aim_settings.safe_walk_enabled = false
-        getgenv().aim_settings.fly_enabled = false
-        getgenv().aim_settings.freecam_enabled = false
-        getgenv().aim_settings.anti_fling = false
-        getgenv().aim_settings.fullbright = false
-        getgenv().aim_settings.always_day = false
-        getgenv().aim_settings.world_tweaks_enabled = false
-        getgenv().aim_settings.hitboxes_enabled = false
-        getgenv().aim_settings.hud_enabled = false
-        getgenv().aim_settings.watermark_enabled = false
-        getgenv().aim_settings.keybind_list_enabled = false
-        getgenv().aim_settings.hud_arraylist = false
-        getgenv().aim_settings.esp_box = false
-        getgenv().aim_settings.esp_tracers = false
-        getgenv().aim_settings.noclip_enabled = false
-        getgenv().aim_settings.anti_afk = false
-        getgenv().aim_settings.friends_window = false
-        getgenv().aim_settings.running = false
+        -- Отключаем абсолютно все функции и флаги перед выгрузкой
+        for key, value in pairs(getgenv().aim_settings) do
+            if type(value) == "boolean" then
+                getgenv().aim_settings[key] = false
+            end
+        end
         
         -- Очищаем все hotkeys
         getgenv().aim_settings.hotkeys = {}
@@ -10479,8 +10018,16 @@ State.connections.mainLoop = G.RS.RenderStepped:Connect(function()
         pcall(function() Movement.Speed.Cleanup() end)
         pcall(function() Movement.SafeWalk.Cleanup() end)
         pcall(function() Fly_Cleanup() end)
+        pcall(function() Clumsy_Cleanup() end)
         pcall(function() restoreWorldTweaks() end)
         pcall(function() IJ_CP() end)
+        pcall(function() restoreAllViewmodelParts() end)
+        if tpwalkConnection then
+            pcall(function()
+                tpwalkConnection:Disconnect()
+                tpwalkConnection = nil
+            end)
+        end
         
         -- Восстанавливаем Freecam
         local fc = getgenv().freecam_data
@@ -11702,7 +11249,7 @@ local function Clumsy_Init()
 end
 
 -- Инициализация Clumsy при включении
-G.LP.CharacterAdded:Connect(function()
+State.connections.clumsyCharAdded = G.LP.CharacterAdded:Connect(function()
     task.wait(1)
     if getgenv().aim_settings.clumsy_enabled then
         Clumsy_Init()
