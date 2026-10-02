@@ -329,6 +329,8 @@ local function tw(o, p, t) return G.TS:Create(o, TweenInfo.new(t or 0.25, Enum.E
 -- Таблица расширений. Объявлена здесь, потому что на неё ссылаются
 -- обработчики, создаваемые выше блока EXTENSIONS (например, ПКМ по биндам).
 local EXT = {}
+local panelAnimationState = "hidden"
+local Clumsy_Cleanup, Clumsy_Init
 
 -- [[ GLOBAL STATE ]]
 local State = {
@@ -2529,7 +2531,7 @@ local function clearChinaHatState()
         end
     end
 
-    lastCameraMode = nil
+    State.lastCameraMode = nil
     State.chinaHatActive = false
 end
 
@@ -4952,8 +4954,8 @@ function CategoryPanel:addColorPicker(moduleData, name, settingKey)
             
             -- Вычисляем относительную позицию мыши в области picker
             -- Добавляем смещение -18 по Y (вниз)
-            local relativeX = (mouse.X - pos.X) / size.X
-            local relativeY = ((mouse.Y - 50) - pos.Y) / size.Y
+            local relativeX = (mouse.X - pos.X) / math.max(size.X, 1)
+            local relativeY = ((mouse.Y - 50) - pos.Y) / math.max(size.Y, 1)
             
             currentS = math.clamp(relativeX, 0, 1)
             currentV = math.clamp(1 - relativeY, 0, 1) -- Инвертируем Y для правильного направления
@@ -4968,7 +4970,7 @@ function CategoryPanel:addColorPicker(moduleData, name, settingKey)
             local size = hueSlider.AbsoluteSize
             
             -- Вычисляем относительную позицию мыши в hue slider
-            local relativeY = ((mouse.Y - 50) - pos.Y) / size.Y
+            local relativeY = ((mouse.Y - 50) - pos.Y) / math.max(size.Y, 1)
             
             currentH = math.clamp(relativeY, 0, 1)
             updatePickerColor()
@@ -4983,8 +4985,8 @@ function CategoryPanel:addColorPicker(moduleData, name, settingKey)
                     
                     -- Вычисляем относительную позицию мыши в области picker
                     -- Добавляем смещение -50 по Y (вниз)
-                    local relativeX = (mouse.X - pos.X) / size.X
-                    local relativeY = ((mouse.Y - 50) - pos.Y) / size.Y
+                    local relativeX = (mouse.X - pos.X) / math.max(size.X, 1)
+                    local relativeY = ((mouse.Y - 50) - pos.Y) / math.max(size.Y, 1)
                     
                     currentS = math.clamp(relativeX, 0, 1)
                     currentV = math.clamp(1 - relativeY, 0, 1) -- Инвертируем Y для правильного направления
@@ -4997,7 +4999,7 @@ function CategoryPanel:addColorPicker(moduleData, name, settingKey)
                     local size = hueSlider.AbsoluteSize
                     
                     -- Вычисляем относительную позицию мыши в hue slider
-                    local relativeY = ((mouse.Y - 50) - pos.Y) / size.Y
+                    local relativeY = ((mouse.Y - 50) - pos.Y) / math.max(size.Y, 1)
                     
                     currentH = math.clamp(relativeY, 0, 1)
                     updatePickerColor()
@@ -8687,181 +8689,6 @@ State.connections.mainLoop = G.RS.RenderStepped:Connect(function()
     if G.LP.Character and not getgenv().aim_settings.esp_self then
         clearCharacterVisuals(G.LP.Character)
     end
-
-    if false then
-    for _, p in pairs(currentPlayers) do
-        if p.Character and (p ~= G.LP or getgenv().aim_settings.esp_self) then
-            local isLocalPlayer = p == G.LP
-            local isFriendPlayer = isFriend(p.Name)
-            
-            -- Проверка Hide Team
-            local shouldHide = false
-            if getgenv().aim_settings.esp_hide_team and not isLocalPlayer then
-                if G.LP.Team and p.Team == G.LP.Team then
-                    shouldHide = true
-                end
-            end
-            
-            -- Определяем цвет ESP
-            local espColor
-            if getgenv().aim_settings.esp_team_color and p.Team then
-                espColor = p.Team.TeamColor.Color
-            else
-                espColor = Color3.fromRGB(255, 255, 255) -- Белый по умолчанию
-            end
-            
-            -- Highlight (подсветка игрока) - Chams
-            local hl = p.Character:FindFirstChild("Y_ESP") or Instance.new("Highlight", p.Character)
-            hl.Name = "Y_ESP"
-            hl.Enabled = getgenv().aim_settings.esp_enabled and getgenv().aim_settings.esp_chams and not shouldHide
-            
-            -- Chams настройки
-            if getgenv().aim_settings.esp_team_color and p.Team then
-                hl.FillColor = p.Team.TeamColor.Color
-            else
-                hl.FillColor = getgenv().aim_settings.esp_chams_color
-            end
-            hl.FillTransparency = 0.5
-            
-            -- Chams Outline
-            if getgenv().aim_settings.esp_chams_outline then
-                hl.OutlineColor = Color3.new(0, 0, 0)
-                hl.OutlineTransparency = 0
-            else
-                hl.OutlineTransparency = 1
-            end
-
-            if getgenv().aim_settings.esp_enabled and getgenv().aim_settings.esp_glow_chams and not shouldHide then
-                addAuraChams(p.Character, hl.FillColor)
-            else
-                clearAuraChams(p.Character)
-            end
-            
-            -- ESP Text Info
-            local head = p.Character:FindFirstChild("Head")
-            if head then
-                -- Создаем или находим BillboardGui
-                local billboardGui = head:FindFirstChild("Y_ESP_Text")
-                if not billboardGui then
-                    billboardGui = Instance.new("BillboardGui", head)
-                    billboardGui.Name = "Y_ESP_Text"
-                    billboardGui.Size = UDim2.new(0, 200, 0, 100)
-                    billboardGui.StudsOffset = Vector3.new(0, 2, 0)
-                    billboardGui.AlwaysOnTop = true
-                end
-                
-                -- Проверяем нужно ли показывать хоть один элемент текста
-                local shouldShowText = getgenv().aim_settings.esp_nametags or 
-                                      getgenv().aim_settings.esp_hp_bar or 
-                                      getgenv().aim_settings.esp_tool or 
-                                      getgenv().aim_settings.esp_distance
-                
-                -- Текст показывается только когда ESP включен И не скрыт командой И включен хоть один элемент
-                billboardGui.Enabled = getgenv().aim_settings.esp_enabled and not shouldHide and shouldShowText
-                
-                -- Создаем или находим TextLabel
-                local textLabel = billboardGui:FindFirstChild("TextLabel")
-                if not textLabel then
-                    textLabel = Instance.new("TextLabel", billboardGui)
-                    textLabel.Size = UDim2.new(1, 0, 1, 0)
-                    textLabel.BackgroundTransparency = 1
-                    textLabel.Font = Enum.Font.GothamBold
-                    textLabel.TextSize = 14
-                    textLabel.TextStrokeTransparency = 0.5
-                    textLabel.TextColor3 = Color3.fromRGB(255, 255, 255)
-                end
-                
-                -- Обновляем текст с учётом настроек
-                local hum = p.Character:FindFirstChildOfClass("Humanoid")
-                if hum and G.Cam and G.Cam.CFrame then
-                    local textParts = {}
-                    
-                    -- NameTag
-                    if getgenv().aim_settings.esp_nametags then
-                        table.insert(textParts, p.Name)
-                    end
-                    
-                    -- HP Bar
-                    if getgenv().aim_settings.esp_hp_bar then
-                        local health = math.floor(hum.Health)
-                        local maxHealth = math.floor(hum.MaxHealth)
-                        table.insert(textParts, health .. "/" .. maxHealth .. " HP")
-                    end
-                    
-                    -- Tool
-                    if getgenv().aim_settings.esp_tool then
-                        local tool = p.Character:FindFirstChildOfClass("Tool")
-                        if tool then
-                            table.insert(textParts, "[" .. tool.Name .. "]")
-                        end
-                    end
-                    
-                    -- Distance
-                    if getgenv().aim_settings.esp_distance then
-                        local distance = math.floor((head.Position - G.Cam.CFrame.Position).Magnitude)
-                        table.insert(textParts, distance .. " studs")
-                    end
-                    
-                    textLabel.Text = table.concat(textParts, "\n")
-                    
-                    -- Цвет текста в зависимости от Team Color
-                    if getgenv().aim_settings.esp_team_color and p.Team then
-                        textLabel.TextColor3 = p.Team.TeamColor.Color
-                    else
-                        textLabel.TextColor3 = Color3.fromRGB(255, 255, 255)
-                    end
-                end
-                
-                -- Friend Marker (как в Sims - зеленый ромб над головой)
-                local friendMarker = head:FindFirstChild("Y_Friend_Marker")
-                if getgenv().aim_settings.friend_markers and isFriendPlayer then
-                    if not friendMarker then
-                        friendMarker = Instance.new("BillboardGui", head)
-                        friendMarker.Name = "Y_Friend_Marker"
-                        friendMarker.Size = UDim2.new(0, 40, 0, 30)
-                        friendMarker.StudsOffset = Vector3.new(0, 3, 0)
-                        friendMarker.AlwaysOnTop = true
-                        
-                        -- Ромб (повернутый квадрат)
-                        local diamond = Instance.new("Frame", friendMarker)
-                        diamond.Size = UDim2.new(0, 22, 0, 22)
-                        diamond.Position = UDim2.new(0.5, -11, 0.5, -11)
-                        diamond.AnchorPoint = Vector2.new(0.5, 0.5)
-                        diamond.BackgroundColor3 = Color3.fromRGB(100, 255, 100)
-                        diamond.BorderSizePixel = 0
-                        diamond.Rotation = 45
-                        
-                        local diamondStroke = Instance.new("UIStroke", diamond)
-                        diamondStroke.Color = Color3.fromRGB(50, 200, 50)
-                        diamondStroke.Thickness = 2
-                    end
-                    friendMarker.Enabled = true
-                else
-                    if friendMarker then
-                        friendMarker.Enabled = false
-                    end
-                end
-            end
-        end
-    end
-
-    if G.LP.Character and not getgenv().aim_settings.esp_self then
-        if G.LP.Character:FindFirstChild("Y_ESP") then
-            G.LP.Character.Y_ESP:Destroy()
-        end
-        clearAuraChams(G.LP.Character)
-
-        local localHead = G.LP.Character:FindFirstChild("Head")
-        if localHead then
-            if localHead:FindFirstChild("Y_ESP_Text") then
-                localHead.Y_ESP_Text:Destroy()
-            end
-            if localHead:FindFirstChild("Y_Friend_Marker") then
-                localHead.Y_Friend_Marker:Destroy()
-            end
-        end
-    end
-    end
     lastEspUpdate = t
     State.playerVisualsActive = true
     State.persistentPlayerEspActive = persistentPlayerEspEnabled
@@ -8881,7 +8708,7 @@ State.connections.mainLoop = G.RS.RenderStepped:Connect(function()
         local player = G.Plr:GetPlayerFromCharacter(character)
         
         if humanoid and humanoid.Health > 0 and player then
-            local velocity = State.LockedTarget.Velocity
+            local velocity = State.LockedTarget.AssemblyLinearVelocity or State.LockedTarget.Velocity
             local horizontalVelocity = Vector3.new(velocity.X, 0, velocity.Z)
             local speed = math.floor(horizontalVelocity.Magnitude * 10) / 10
             SpeedLabel.Text = "Target Speed: " .. speed .. " studs/s"
@@ -8904,7 +8731,7 @@ State.connections.mainLoop = G.RS.RenderStepped:Connect(function()
             local humanoid = character:FindFirstChildOfClass("Humanoid")
             
             if humanoidRootPart and humanoid and humanoid.Health > 0 then
-                local velocity = humanoidRootPart.Velocity
+                local velocity = humanoidRootPart.AssemblyLinearVelocity or humanoidRootPart.Velocity
                 local horizontalVelocity = Vector3.new(velocity.X, 0, velocity.Z)
                 local speed = math.floor(horizontalVelocity.Magnitude * 10) / 10
                 
@@ -9363,24 +9190,25 @@ State.connections.mainLoop = G.RS.RenderStepped:Connect(function()
                 -- Проверяем режим камеры для Hide in First Person
                 local shouldHide = false
                 if getgenv().aim_settings.hide_in_first_person then
-                    if G.Cam and G.Cam.CameraSubject == player.Character.Humanoid then
+                    local humanoid = player.Character:FindFirstChildOfClass("Humanoid")
+                    if G.Cam and humanoid and G.Cam.CameraSubject == humanoid then
                         -- Более стабильная проверка первого лица
                         local distance = (G.Cam.CFrame.Position - head.Position).Magnitude
                         local isFirstPerson = distance < 1.5
                         
                         -- Добавляем гистерезис для предотвращения мерцания
-                        if lastCameraMode == nil then
-                            lastCameraMode = isFirstPerson
+                        if State.lastCameraMode == nil then
+                            State.lastCameraMode = isFirstPerson
                             shouldHide = isFirstPerson
                         else
                             if isFirstPerson and distance < 1.2 then
-                                lastCameraMode = true
+                                State.lastCameraMode = true
                                 shouldHide = true
                             elseif not isFirstPerson and distance > 2.0 then
-                                lastCameraMode = false
+                                State.lastCameraMode = false
                                 shouldHide = false
                             else
-                                shouldHide = lastCameraMode
+                                shouldHide = State.lastCameraMode
                             end
                         end
                     end
@@ -9593,82 +9421,36 @@ State.connections.mainLoop = G.RS.RenderStepped:Connect(function()
             ClickGuiImage.Size = UDim2.new(0, 280, 0, 460)
             ClickGuiImage.Position = UDim2.new(1, -300, 1, -450)
             
+            -- Сбрасываем trollface анимацию и музыку, если выбран другой скин
+            local imageMode = getgenv().aim_settings.clickgui_image_mode
+            if imageMode ~= "trollface" then
+                if State.trollface.originalPosition then
+                    ClickGuiImage.Position = State.trollface.originalPosition
+                    State.trollface.originalPosition = nil
+                end
+                if State.trollface.music then
+                    State.trollface.music:Stop()
+                    State.trollface.music:Destroy()
+                    State.trollface.music = nil
+                end
+            end
+
             -- Обновляем картинку в зависимости от режима
-            if getgenv().aim_settings.clickgui_image_mode == "Vanilla" then
+            if imageMode == "Vanilla" then
                 ClickGuiImage.Image = "http://www.roblox.com/asset/?id=7331776965"
-                -- Сбрасываем trollface анимацию и музыку
-                if State.trollface.originalPosition then
-                    ClickGuiImage.Position = State.trollface.originalPosition
-                    State.trollface.originalPosition = nil
-                end
-                if State.trollface.music then
-                    State.trollface.music:Stop()
-                    State.trollface.music:Destroy()
-                    State.trollface.music = nil
-                end
-            elseif getgenv().aim_settings.clickgui_image_mode == "Azuki" then
+            elseif imageMode == "Azuki" then
                 ClickGuiImage.Image = "http://www.roblox.com/asset/?id=7331759194"
-                -- Сбрасываем trollface анимацию и музыку
-                if State.trollface.originalPosition then
-                    ClickGuiImage.Position = State.trollface.originalPosition
-                    State.trollface.originalPosition = nil
-                end
-                if State.trollface.music then
-                    State.trollface.music:Stop()
-                    State.trollface.music:Destroy()
-                    State.trollface.music = nil
-                end
-            elseif getgenv().aim_settings.clickgui_image_mode == "mgebrat" then
+            elseif imageMode == "mgebrat" then
                 ClickGuiImage.Image = "rbxassetid://108286603977430"
-                -- Сбрасываем trollface анимацию и музыку
-                if State.trollface.originalPosition then
-                    ClickGuiImage.Position = State.trollface.originalPosition
-                    State.trollface.originalPosition = nil
-                end
-                if State.trollface.music then
-                    State.trollface.music:Stop()
-                    State.trollface.music:Destroy()
-                    State.trollface.music = nil
-                end
-            elseif getgenv().aim_settings.clickgui_image_mode == "larp" then
+            elseif imageMode == "larp" then
                 ClickGuiImage.Image = "rbxassetid://126488944636237"
-                -- Сбрасываем trollface анимацию и музыку
-                if State.trollface.originalPosition then
-                    ClickGuiImage.Position = State.trollface.originalPosition
-                    State.trollface.originalPosition = nil
-                end
-                if State.trollface.music then
-                    State.trollface.music:Stop()
-                    State.trollface.music:Destroy()
-                    State.trollface.music = nil
-                end
-            elseif getgenv().aim_settings.clickgui_image_mode == "larp2" then
+            elseif imageMode == "larp2" then
                 ClickGuiImage.Image = "rbxassetid://112963740799060"
-                -- Сбрасываем trollface анимацию и музыку
-                if State.trollface.originalPosition then
-                    ClickGuiImage.Position = State.trollface.originalPosition
-                    State.trollface.originalPosition = nil
-                end
-                if State.trollface.music then
-                    State.trollface.music:Stop()
-                    State.trollface.music:Destroy()
-                    State.trollface.music = nil
-                end
-            elseif getgenv().aim_settings.clickgui_image_mode == "Rena" then
+            elseif imageMode == "Rena" then
                 ClickGuiImage.Size = UDim2.new(0, 240, 0, 460)
                 ClickGuiImage.Position = UDim2.new(1, -260, 1, -450)
                 ClickGuiImage.Image = "rbxassetid://124128032074674"
-                -- Сбрасываем trollface анимацию и музыку
-                if State.trollface.originalPosition then
-                    ClickGuiImage.Position = State.trollface.originalPosition
-                    State.trollface.originalPosition = nil
-                end
-                if State.trollface.music then
-                    State.trollface.music:Stop()
-                    State.trollface.music:Destroy()
-                    State.trollface.music = nil
-                end
-            elseif getgenv().aim_settings.clickgui_image_mode == "renagif" then
+            elseif imageMode == "renagif" then
                 ClickGuiImage.Size = UDim2.new(0, 240, 0, 460)
                 ClickGuiImage.Position = UDim2.new(1, -260, 1, -450)
                 ClickGuiImage.ScaleType = Enum.ScaleType.Stretch
@@ -9680,16 +9462,7 @@ State.connections.mainLoop = G.RS.RenderStepped:Connect(function()
                     State.renaGif.lastFrame = nextFrame
                     ClickGuiImage.Image = nextFrame
                 end
-                if State.trollface.originalPosition then
-                    ClickGuiImage.Position = State.trollface.originalPosition
-                    State.trollface.originalPosition = nil
-                end
-                if State.trollface.music then
-                    State.trollface.music:Stop()
-                    State.trollface.music:Destroy()
-                    State.trollface.music = nil
-                end
-            elseif getgenv().aim_settings.clickgui_image_mode == "kurumigif" then
+            elseif imageMode == "kurumigif" then
                 ClickGuiImage.Size = UDim2.new(0, 240, 0, 460)
                 ClickGuiImage.Position = UDim2.new(1, -260, 1, -450)
                 ClickGuiImage.ScaleType = Enum.ScaleType.Stretch
@@ -9701,16 +9474,7 @@ State.connections.mainLoop = G.RS.RenderStepped:Connect(function()
                     State.kurumiGif.lastFrame = nextFrame
                     ClickGuiImage.Image = nextFrame
                 end
-                if State.trollface.originalPosition then
-                    ClickGuiImage.Position = State.trollface.originalPosition
-                    State.trollface.originalPosition = nil
-                end
-                if State.trollface.music then
-                    State.trollface.music:Stop()
-                    State.trollface.music:Destroy()
-                    State.trollface.music = nil
-                end
-            elseif getgenv().aim_settings.clickgui_image_mode == "trollface" then
+            elseif imageMode == "trollface" then
                 ClickGuiImage.Image = "rbxassetid://91788760747906"
                 
                 -- Trollface animation effects
@@ -9944,7 +9708,7 @@ State.connections.mainLoop = G.RS.RenderStepped:Connect(function()
             TargetHPLabel.Text = string.format("HP: %d / %d",
                 math.floor(health + 0.5), math.floor(maxHealth + 0.5))
 
-            local velocity = State.LockedTarget.Velocity
+            local velocity = State.LockedTarget.AssemblyLinearVelocity or State.LockedTarget.Velocity
             local speed = Vector3.new(velocity.X, 0, velocity.Z).Magnitude
             TargetSpeedInfoLabel.Text = string.format("%.1f studs/s", speed)
 
@@ -9978,7 +9742,7 @@ State.connections.mainLoop = G.RS.RenderStepped:Connect(function()
         local previewRoot = G.LP.Character and G.LP.Character:FindFirstChild("HumanoidRootPart")
         local previewHealth = math.floor((previewHumanoid and previewHumanoid.Health) or 100)
         local previewMaxHealth = math.max((previewHumanoid and previewHumanoid.MaxHealth) or 100, 1)
-        local previewVelocity = previewRoot and previewRoot.Velocity or Vector3.new(0, 0, 0)
+        local previewVelocity = previewRoot and (previewRoot.AssemblyLinearVelocity or previewRoot.Velocity) or Vector3.new(0, 0, 0)
         local previewHorizontalVelocity = Vector3.new(previewVelocity.X, 0, previewVelocity.Z)
         local previewSpeed = math.floor(previewHorizontalVelocity.Magnitude * 10) / 10
         TargetHPLabel.Text = string.format("HP: %d / %d",
@@ -10141,7 +9905,7 @@ State.connections.mainLoop = G.RS.RenderStepped:Connect(function()
                 obj:Destroy()
             end
         end
-        lastCameraMode = nil
+        State.lastCameraMode = nil
         
         -- Очищаем ауру и хитбоксы
         EXT.clearAura()
@@ -11140,7 +10904,7 @@ local function Fly_Init()
 end
 
 -- Clumsy Functions
-local function Clumsy_Cleanup()
+Clumsy_Cleanup = function()
     if State.clumsy then
         if State.clumsy.connection then State.clumsy.connection:Disconnect() end
         if State.clumsy.bodyGyro then State.clumsy.bodyGyro:Destroy() end
@@ -11152,7 +10916,7 @@ local function Clumsy_Cleanup()
     end
 end
 
-local function Clumsy_Init()
+Clumsy_Init = function()
     Clumsy_Cleanup()
     if not getgenv().aim_settings.clumsy_enabled then return end
     
