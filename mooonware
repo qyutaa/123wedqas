@@ -74,7 +74,6 @@ getgenv().aim_settings = {
     noise_enabled = false,
     noise_amount = 0.1,
     toggle_key = Enum.KeyCode.X,
-    ui_bind = Enum.KeyCode.RightControl,
     click_action = false,
     click_action_key = Enum.KeyCode.LeftControl,
     running = true,
@@ -103,8 +102,12 @@ getgenv().aim_settings = {
     unload_script = false,
     hud_enabled = false,
     watermark_enabled = false,
+    watermark_memory_enabled = true,
+    perf_graph_enabled = false,
     player_info_enabled = false, -- Отображение информации о локальном игроке (скорость)
     client_color = Color3.fromRGB(200, 50, 50), -- Цвет клиента
+    theme_preset = "Crimson",
+    menu_scale = 1.0,
     keybind_list_enabled = false,
     jump_circle_enabled = false,
     jump_circle_speed = 0.5,
@@ -265,7 +268,38 @@ getgenv().aim_settings = {
     clumsy_enabled = false,
     clumsy_speed = 50, -- Скорость полета (10-100)
     clumsy_visualize = false, -- Показывать клон персонажа где застыли
+    -- Wall Hop Assist settings (Movement)
+    wallhop_enabled = false,
+    wallhop_power = 50, -- Сила прыжка (20-100)
+    wallhop_cooldown = 0.2, -- Задержка между прыжками (0.05-0.5s)
+    wallhop_auto = false, -- Авто-прыжок при касании стены в воздухе
+    wallhop_flick_angle = 60, -- Угол доворота при флике (30-90)
+    wallhop_camera_flick = true, -- Микро-флик камеры как на видео
+    -- Edge Jump settings (Movement)
+    edge_jump_enabled = false,
+    edge_jump_distance = 2.0, -- Дистанция до края платформы (1.0-4.0)
+    edge_jump_cooldown = 0.25, -- Задержка между прыжками (0.1-0.5s)
+    -- Step Assist settings (Movement)
+    step_assist_enabled = false,
+    step_assist_height = 2.5, -- Максимальная высота препятствия (1.0-4.0)
+    step_assist_mode = "Instant", -- "Instant", "Smooth"
+    -- Fast Stop settings (Movement)
+    fast_stop_enabled = false,
+    fast_stop_strength = 1.0, -- Сила торможения (0.5-1.0)
 }
+
+-- Снимок дефолтных настроек для кнопки сброса (Reset Defaults)
+local DEFAULT_SETTINGS = {}
+for k, v in pairs(getgenv().aim_settings) do
+    if type(v) == "table" and typeof(v) ~= "Color3" and typeof(v) ~= "EnumItem" then
+        DEFAULT_SETTINGS[k] = {}
+        for subK, subV in pairs(v) do
+            DEFAULT_SETTINGS[k][subK] = subV
+        end
+    else
+        DEFAULT_SETTINGS[k] = v
+    end
+end
 
 -- [1.3] Сервисы и системные переменные
 local G = {
@@ -358,6 +392,10 @@ local State = {
     speed = {}, -- Хранение данных Speed
     fly = {}, -- Хранение данных Fly
     clumsy = {}, -- Хранение данных Clumsy
+    wallHop = {}, -- Хранение данных Wall Hop
+    edgeJump = {}, -- Хранение данных Edge Jump
+    stepAssist = {}, -- Хранение данных Step Assist
+    fastStop = {}, -- Хранение данных Fast Stop
     targetStrafe = {
         angle = 0,
         active = false,
@@ -386,6 +424,11 @@ local State = {
         fpsAnimProgress = 1,
         pingAnimProgress = 1
     },
+    perfGraph = {
+        history = {60,60,60,60,60,60,60,60,60,60,60,60,60,60,60,60,60,60,60,60,60,60,60,60,60,60,60,60},
+        lastUpdate = 0
+    },
+    perfBars = {},
     keybindItems = {},   -- name -> строка списка
     keybindSignature = nil,
     draggables = {},      -- ключ -> GuiObject, для сохранения позиций
@@ -518,6 +561,75 @@ local State = {
         lastFrame = nil
     }
 }
+
+-- Кэши меняются по событиям; частота анимаций и физики сохранена.
+State.cachedPlayers = G.Plr:GetPlayers()
+State.moduleScaleAnimations = {}
+State.characterPartCache = {}
+
+State.connections.cachedPlayerAdded = G.Plr.PlayerAdded:Connect(function(player)
+    table.insert(State.cachedPlayers, player)
+end)
+State.connections.cachedPlayerRemoving = G.Plr.PlayerRemoving:Connect(function(player)
+    local index = table.find(State.cachedPlayers, player)
+    if index then table.remove(State.cachedPlayers, index) end
+    if player.Character then EXT.releaseCharacterParts(player.Character) end
+end)
+
+function EXT.getPlayers()
+    return State.cachedPlayers
+end
+
+function EXT.releaseCharacterParts(character)
+    local entry = State.characterPartCache[character]
+    if not entry then return end
+    entry.added:Disconnect()
+    entry.removing:Disconnect()
+    entry.ancestry:Disconnect()
+    State.characterPartCache[character] = nil
+end
+
+function EXT.getCharacterParts(character)
+    local entry = State.characterPartCache[character]
+    if not entry then
+        entry = {parts = {}, dirty = true}
+        for _, part in ipairs(character:GetDescendants()) do
+            if part:IsA("BasePart") then entry.parts[part] = true end
+        end
+        entry.added = character.DescendantAdded:Connect(function(part)
+            if part:IsA("BasePart") then
+                entry.parts[part] = true
+                entry.dirty = true
+            end
+        end)
+        entry.removing = character.DescendantRemoving:Connect(function(part)
+            if entry.parts[part] then
+                entry.parts[part] = nil
+                entry.dirty = true
+            end
+        end)
+        entry.ancestry = character.AncestryChanged:Connect(function(_, parent)
+            if not parent then EXT.releaseCharacterParts(character) end
+        end)
+        State.characterPartCache[character] = entry
+    end
+    if entry.dirty then
+        entry.list = {}
+        for part in pairs(entry.parts) do
+            entry.list[#entry.list + 1] = part
+        end
+        entry.dirty = false
+    end
+    return entry.list
+end
+
+function EXT.updateModuleScales()
+    for button, animation in pairs(State.moduleScaleAnimations) do
+        if not button.Parent or not animation() then
+            State.moduleScaleAnimations[button] = nil
+        end
+    end
+end
 
 -- Blacklist объявлен устаревшим; Exclude есть не во всех сборках,
 -- поэтому берём его через pcall с откатом на старое имя.
@@ -947,6 +1059,403 @@ Movement.SafeWalk = {
     end
 }
 
+Movement.WallHop = {
+    Cleanup = function()
+        if State.wallHop then
+            if State.wallHop.connection then
+                pcall(function() State.wallHop.connection:Disconnect() end)
+                State.wallHop.connection = nil
+            end
+            if State.wallHop.jumpConnection then
+                pcall(function() State.wallHop.jumpConnection:Disconnect() end)
+                State.wallHop.jumpConnection = nil
+            end
+            State.wallHop = {}
+        end
+    end,
+    Init = function()
+        Movement.WallHop.Cleanup()
+        if not getgenv().aim_settings.wallhop_enabled then return end
+
+        State.wallHop = {
+            ch = G.LP.Character,
+            lastHop = 0,
+            lastJumpRequest = 0,
+            isFlicking = false
+        }
+        if not State.wallHop.ch then return end
+        State.wallHop.hm = State.wallHop.ch:FindFirstChildOfClass("Humanoid")
+        State.wallHop.hr = State.wallHop.ch:FindFirstChild("HumanoidRootPart")
+        if not State.wallHop.hm or not State.wallHop.hr then return end
+
+        local rayParams = RaycastParams.new()
+        rayParams.FilterDescendantsInstances = {State.wallHop.ch}
+        rayParams.FilterType = G.RayExclude
+        rayParams.IgnoreWater = true
+        State.wallHop.rayParams = rayParams
+
+        local function checkWall()
+            local hr = State.wallHop.hr
+            if not hr or not hr.Parent then return nil, nil end
+
+            local origins = {
+                hr.Position,
+                hr.Position - Vector3.new(0, 1.2, 0),
+                hr.Position + Vector3.new(0, 0.8, 0)
+            }
+            local cf = hr.CFrame
+            local look = cf.LookVector
+            local right = cf.RightVector
+            local checkDirs = {
+                look,
+                (look + right * 0.75).Unit,
+                (look - right * 0.75).Unit,
+                right,
+                -right,
+                (-look + right * 0.75).Unit,
+                (-look - right * 0.75).Unit,
+                -look
+            }
+
+            local rayDist = 2.8
+            for _, origin in ipairs(origins) do
+                for _, dir in ipairs(checkDirs) do
+                    local result = workspace:Raycast(origin, dir * rayDist, State.wallHop.rayParams)
+                    if result and result.Instance and result.Instance.CanCollide then
+                        if math.abs(result.Normal.Y) < 0.35 then
+                            return result, dir
+                        end
+                    end
+                end
+            end
+            return nil, nil
+        end
+
+        local function performHop(rayResult, checkDir)
+            local s = getgenv().aim_settings
+            local now = tick()
+            if (now - (State.wallHop.lastHop or 0)) < (s.wallhop_cooldown or 0.2) then
+                return
+            end
+            if State.wallHop.isFlicking then return end
+
+            local hr = State.wallHop.hr
+            local hm = State.wallHop.hm
+            if not hr or not hr.Parent or not hm or not hm.Parent then return end
+
+            State.wallHop.lastHop = now
+            State.wallHop.isFlicking = true
+
+            local normal = rayResult.Normal
+            local power = s.wallhop_power or 50
+            local flickAngleDeg = s.wallhop_flick_angle or 60
+
+            -- Вычисляем направление флика в сторону от стены
+            local cross = hr.CFrame.LookVector:Cross(normal)
+            local flickSign = (cross.Y >= 0) and 1 or -1
+            local appliedFlickAngle = flickAngleDeg * flickSign
+
+            -- Микро-поворот хитбокса персонажа для зацепа за пиксель/стык стены
+            hr.CFrame = hr.CFrame * CFrame.Angles(0, math.rad(appliedFlickAngle), 0)
+
+            -- Визуальная помощь фликом камеры (как на YouTube-видео)
+            if s.wallhop_camera_flick and G.Cam then
+                local camFlickAngle = 16 * flickSign
+                pcall(function()
+                    G.Cam.CFrame = G.Cam.CFrame * CFrame.Angles(0, math.rad(camFlickAngle), 0)
+                    task.delay(0.04, function()
+                        pcall(function()
+                            if G.Cam then
+                                G.Cam.CFrame = G.Cam.CFrame * CFrame.Angles(0, math.rad(-camFlickAngle), 0)
+                            end
+                        end)
+                    end)
+                end)
+            end
+
+            -- Сброс состояния на Jumping для инициации прыжка
+            hm:ChangeState(Enum.HumanoidStateType.Jumping)
+
+            -- Assist-импульс: направленный толчок вверх и безопасный отступ от стены
+            local curVel = hr.Velocity
+            local pushOut = 3
+            local upwardVel = power
+            if hm.UseJumpPower and hm.JumpPower > power then
+                upwardVel = hm.JumpPower
+            end
+
+            local newVel = Vector3.new(
+                curVel.X * 0.35 + normal.X * pushOut,
+                upwardVel,
+                curVel.Z * 0.35 + normal.Z * pushOut
+            )
+            pcall(function() hr.AssemblyLinearVelocity = newVel end)
+            hr.Velocity = newVel
+
+            -- Возвращаем угол поворота персонажа на следующем кадре без сброса высоты
+            task.defer(function()
+                if hr and hr.Parent then
+                    hr.CFrame = hr.CFrame * CFrame.Angles(0, math.rad(-appliedFlickAngle), 0)
+                end
+                State.wallHop.isFlicking = false
+            end)
+        end
+
+        local function checkAndHop()
+            local hm = State.wallHop.hm
+            if not hm or not hm.Parent then return end
+            local st = hm:GetState()
+            if st == Enum.HumanoidStateType.Freefall or st == Enum.HumanoidStateType.Jumping or st == Enum.HumanoidStateType.FallingDown then
+                local hit, dir = checkWall()
+                if hit then
+                    performHop(hit, dir)
+                end
+            end
+        end
+
+        State.wallHop.jumpConnection = G.UIS.JumpRequest:Connect(function()
+            if not getgenv().aim_settings.wallhop_enabled then return end
+            State.wallHop.lastJumpRequest = tick()
+            checkAndHop()
+        end)
+
+        State.wallHop.connection = G.RS.Heartbeat:Connect(function()
+            local s = getgenv().aim_settings
+            if not s.wallhop_enabled or not (State.wallHop.ch and State.wallHop.ch.Parent and State.wallHop.hm and State.wallHop.hr and State.wallHop.hr.Parent) then
+                Movement.WallHop.Cleanup()
+                return
+            end
+
+            local shouldHop = false
+            if s.wallhop_auto then
+                shouldHop = true
+            elseif (tick() - (State.wallHop.lastJumpRequest or 0)) < 0.22 then
+                shouldHop = true
+            else
+                local isHoldingSpace = false
+                pcall(function()
+                    isHoldingSpace = G.UIS:IsKeyDown(Enum.KeyCode.Space)
+                end)
+                if isHoldingSpace then
+                    shouldHop = true
+                end
+            end
+
+            if shouldHop then
+                checkAndHop()
+            end
+        end)
+    end
+}
+
+Movement.EdgeJump = {
+    Cleanup = function()
+        if State.edgeJump then
+            if State.edgeJump.connection then
+                pcall(function() State.edgeJump.connection:Disconnect() end)
+                State.edgeJump.connection = nil
+            end
+            State.edgeJump = {}
+        end
+    end,
+    Init = function()
+        Movement.EdgeJump.Cleanup()
+        if not getgenv().aim_settings.edge_jump_enabled then return end
+
+        State.edgeJump = {
+            ch = G.LP.Character,
+            lastJump = 0
+        }
+        if not State.edgeJump.ch then return end
+        State.edgeJump.hm = State.edgeJump.ch:FindFirstChildOfClass("Humanoid")
+        State.edgeJump.hr = State.edgeJump.ch:FindFirstChild("HumanoidRootPart")
+        if not State.edgeJump.hm or not State.edgeJump.hr then return end
+
+        local rayParams = RaycastParams.new()
+        rayParams.FilterDescendantsInstances = {State.edgeJump.ch}
+        rayParams.FilterType = G.RayExclude
+        rayParams.IgnoreWater = true
+        State.edgeJump.rayParams = rayParams
+
+        State.edgeJump.connection = G.RS.Heartbeat:Connect(function()
+            local s = getgenv().aim_settings
+            if not s.edge_jump_enabled or not (State.edgeJump.ch and State.edgeJump.ch.Parent and State.edgeJump.hm and State.edgeJump.hr and State.edgeJump.hr.Parent) then
+                Movement.EdgeJump.Cleanup()
+                return
+            end
+
+            local hm = State.edgeJump.hm
+            local hr = State.edgeJump.hr
+            local st = hm:GetState()
+
+            if st ~= Enum.HumanoidStateType.Running and st ~= Enum.HumanoidStateType.RunningNoPhysics then
+                return
+            end
+
+            local now = tick()
+            if (now - (State.edgeJump.lastJump or 0)) < (s.edge_jump_cooldown or 0.25) then
+                return
+            end
+
+            local moveDir = hm.MoveDirection
+            if moveDir.Magnitude < 0.1 then
+                return
+            end
+
+            local checkDist = s.edge_jump_distance or 2.0
+            local currentPos = hr.Position
+            local futurePos = currentPos + (moveDir.Unit * checkDist)
+
+            -- 1. Проверяем наличие земли под текущей позицией
+            local currentGroundRay = workspace:Raycast(currentPos, Vector3.new(0, -5, 0), State.edgeJump.rayParams)
+            if not currentGroundRay then
+                return
+            end
+
+            -- 2. Проверяем наличие земли впереди по направлению движения
+            local aheadRayOrigin = futurePos + Vector3.new(0, 1.5, 0)
+            local aheadRayDir = Vector3.new(0, -8, 0)
+            local aheadGroundRay = workspace:Raycast(aheadRayOrigin, aheadRayDir, State.edgeJump.rayParams)
+
+            -- Если под ногами есть земля, а впереди обрыв - совершаем прыжок с края
+            if not aheadGroundRay then
+                State.edgeJump.lastJump = now
+                hm:ChangeState(Enum.HumanoidStateType.Jumping)
+            end
+        end)
+    end
+}
+
+Movement.StepAssist = {
+    Cleanup = function()
+        if State.stepAssist then
+            if State.stepAssist.connection then
+                pcall(function() State.stepAssist.connection:Disconnect() end)
+                State.stepAssist.connection = nil
+            end
+            State.stepAssist = {}
+        end
+    end,
+    Init = function()
+        Movement.StepAssist.Cleanup()
+        if not getgenv().aim_settings.step_assist_enabled then return end
+
+        State.stepAssist = {
+            ch = G.LP.Character,
+            lastStep = 0
+        }
+        if not State.stepAssist.ch then return end
+        State.stepAssist.hm = State.stepAssist.ch:FindFirstChildOfClass("Humanoid")
+        State.stepAssist.hr = State.stepAssist.ch:FindFirstChild("HumanoidRootPart")
+        if not State.stepAssist.hm or not State.stepAssist.hr then return end
+
+        local rayParams = RaycastParams.new()
+        rayParams.FilterDescendantsInstances = {State.stepAssist.ch}
+        rayParams.FilterType = G.RayExclude
+        rayParams.IgnoreWater = true
+        State.stepAssist.rayParams = rayParams
+
+        State.stepAssist.connection = G.RS.Heartbeat:Connect(function()
+            local s = getgenv().aim_settings
+            if not s.step_assist_enabled or not (State.stepAssist.ch and State.stepAssist.ch.Parent and State.stepAssist.hm and State.stepAssist.hr and State.stepAssist.hr.Parent) then
+                Movement.StepAssist.Cleanup()
+                return
+            end
+
+            local hm = State.stepAssist.hm
+            local hr = State.stepAssist.hr
+            local st = hm:GetState()
+
+            if st ~= Enum.HumanoidStateType.Running and st ~= Enum.HumanoidStateType.RunningNoPhysics and st ~= Enum.HumanoidStateType.Landed then
+                return
+            end
+
+            local moveDir = hm.MoveDirection
+            if moveDir.Magnitude < 0.1 then return end
+
+            local maxHeight = s.step_assist_height or 2.5
+            local checkDist = 2.0
+
+            -- Луч 1: Проверяем препятствие на уровне стоп
+            local footOrigin = hr.Position - Vector3.new(0, 1.5, 0)
+            local footRay = workspace:Raycast(footOrigin, moveDir.Unit * checkDist, State.stepAssist.rayParams)
+
+            if footRay and footRay.Instance and footRay.Instance.CanCollide then
+                -- Препятствие обнаружено у ног! Проверяем пространство сверху
+                local topOrigin = hr.Position + Vector3.new(0, maxHeight, 0) + (moveDir.Unit * checkDist)
+                local topRay = workspace:Raycast(topOrigin, Vector3.new(0, -maxHeight - 0.5, 0), State.stepAssist.rayParams)
+
+                if topRay and topRay.Instance and topRay.Instance.CanCollide then
+                    local heightDiff = topRay.Position.Y - footOrigin.Y
+                    if heightDiff > 0.4 and heightDiff <= maxHeight then
+                        -- Проверяем свободное пространство для головы
+                        local headClearance = workspace:Raycast(topRay.Position + Vector3.new(0, 0.5, 0), Vector3.new(0, 3.5, 0), State.stepAssist.rayParams)
+                        if not headClearance then
+                            if s.step_assist_mode == "Smooth" then
+                                local targetVel = Vector3.new(hr.Velocity.X, math.clamp(heightDiff * 16, 12, 35), hr.Velocity.Z)
+                                pcall(function() hr.AssemblyLinearVelocity = targetVel end)
+                                hr.Velocity = targetVel
+                            else
+                                hr.CFrame = hr.CFrame + Vector3.new(0, heightDiff + 0.15, 0) + (moveDir.Unit * 0.3)
+                            end
+                        end
+                    end
+                end
+            end
+        end)
+    end
+}
+
+Movement.FastStop = {
+    Cleanup = function()
+        if State.fastStop then
+            if State.fastStop.connection then
+                pcall(function() State.fastStop.connection:Disconnect() end)
+                State.fastStop.connection = nil
+            end
+            State.fastStop = {}
+        end
+    end,
+    Init = function()
+        Movement.FastStop.Cleanup()
+        if not getgenv().aim_settings.fast_stop_enabled then return end
+
+        State.fastStop = {
+            ch = G.LP.Character
+        }
+        if not State.fastStop.ch then return end
+        State.fastStop.hm = State.fastStop.ch:FindFirstChildOfClass("Humanoid")
+        State.fastStop.hr = State.fastStop.ch:FindFirstChild("HumanoidRootPart")
+        if not State.fastStop.hm or not State.fastStop.hr then return end
+
+        State.fastStop.connection = G.RS.Heartbeat:Connect(function()
+            local s = getgenv().aim_settings
+            if not s.fast_stop_enabled or not (State.fastStop.ch and State.fastStop.ch.Parent and State.fastStop.hm and State.fastStop.hr and State.fastStop.hr.Parent) then
+                Movement.FastStop.Cleanup()
+                return
+            end
+
+            local hm = State.fastStop.hm
+            local hr = State.fastStop.hr
+            local st = hm:GetState()
+
+            if st == Enum.HumanoidStateType.Running or st == Enum.HumanoidStateType.RunningNoPhysics or st == Enum.HumanoidStateType.Landed then
+                if hm.MoveDirection.Magnitude == 0 then
+                    local currentVel = hr.Velocity
+                    local horizVel = Vector3.new(currentVel.X, 0, currentVel.Z)
+                    if horizVel.Magnitude > 0.05 then
+                        local strength = math.clamp(s.fast_stop_strength or 1.0, 0.5, 1.0)
+                        local damp = 1.0 - strength
+                        local newVel = Vector3.new(currentVel.X * damp, currentVel.Y, currentVel.Z * damp)
+                        pcall(function() hr.AssemblyLinearVelocity = newVel end)
+                        hr.Velocity = newVel
+                    end
+                end
+            end
+        end)
+    end
+}
+
 -- Wrapper functions for backward compatibility
 local function Spider_Init() Movement.Spider.Init() end
 local function Spider_Cleanup() Movement.Spider.Cleanup() end
@@ -958,6 +1467,14 @@ local function Speed_Init() Movement.Speed.Init() end
 local function Speed_Cleanup() Movement.Speed.Cleanup() end
 local function SafeWalk_Init() Movement.SafeWalk.Init() end
 local function SafeWalk_Cleanup() Movement.SafeWalk.Cleanup() end
+local function WallHop_Init() Movement.WallHop.Init() end
+local function WallHop_Cleanup() Movement.WallHop.Cleanup() end
+local function EdgeJump_Init() Movement.EdgeJump.Init() end
+local function EdgeJump_Cleanup() Movement.EdgeJump.Cleanup() end
+local function StepAssist_Init() Movement.StepAssist.Init() end
+local function StepAssist_Cleanup() Movement.StepAssist.Cleanup() end
+local function FastStop_Init() Movement.FastStop.Init() end
+local function FastStop_Cleanup() Movement.FastStop.Cleanup() end
 
 local FOVCircle = Drawing.new("Circle")
 FOVCircle.Thickness = 2
@@ -1160,8 +1677,50 @@ local function updateAllColors()
         end
     end
     
+    -- Обновляем бары графика производительности
+    if State.perfBars then
+        for _, bar in ipairs(State.perfBars) do
+            bar.BackgroundColor3 = clientColor
+        end
+    end
+
     -- Обновляем последний цвет
     lastClientColor = clientColor
+end
+
+local THEME_PRESET_COLORS = {
+    ["Crimson"] = Color3.fromRGB(200, 50, 50),
+    ["Cyberpunk"] = Color3.fromRGB(0, 235, 185),
+    ["Violet"] = Color3.fromRGB(155, 89, 255),
+    ["Nord"] = Color3.fromRGB(88, 166, 255),
+    ["Emerald"] = Color3.fromRGB(46, 204, 113),
+    ["Sunset"] = Color3.fromRGB(255, 140, 50),
+}
+
+local function applyThemePreset(presetName)
+    local col = THEME_PRESET_COLORS[presetName]
+    if col then
+        getgenv().aim_settings.client_color = col
+        getgenv().aim_settings.theme_preset = presetName
+        updateAllColors()
+        EXT.notify("Тема '" .. presetName .. "' применена", "ok")
+    end
+end
+
+local function applyMenuScale(scale)
+    scale = scale or getgenv().aim_settings.menu_scale or 1
+    for _, panel in ipairs(State.panels or {}) do
+        if panel.uiScale and panelAnimationState == "visible" then
+            panel.uiScale.Scale = scale
+        end
+    end
+    if EXT.SearchBar then
+        local s = EXT.SearchBar:FindFirstChildOfClass("UIScale")
+        if not s then
+            s = Instance.new("UIScale", EXT.SearchBar)
+        end
+        s.Scale = scale
+    end
 end
 
 local ICONS = {
@@ -1477,6 +2036,34 @@ PingLabel.AutomaticSize = Enum.AutomaticSize.X
 PingLabel.Name = "Ping"
 PingLabel.LayoutOrder = 7
 
+-- Разделитель 4 (Memory)
+local Separator4 = Instance.new("TextLabel", watermarkContainer)
+Separator4.TextSize = 14
+Separator4.TextXAlignment = Enum.TextXAlignment.Left
+Separator4.Font = Enum.Font.GothamBold
+Separator4.TextColor3 = Color3.fromRGB(125, 125, 125)
+Separator4.BackgroundTransparency = 1
+Separator4.Size = UDim2.new(0, 0, 1, 0)
+Separator4.Text = " · "
+Separator4.AutomaticSize = Enum.AutomaticSize.X
+Separator4.LayoutOrder = 8
+Separator4.Name = "Sep4"
+Separator4.Visible = false
+
+-- Memory Label
+local MemoryLabel = Instance.new("TextLabel", watermarkContainer)
+MemoryLabel.TextSize = 14
+MemoryLabel.TextXAlignment = Enum.TextXAlignment.Left
+MemoryLabel.Font = Enum.Font.GothamBold
+MemoryLabel.TextColor3 = Color3.fromRGB(255, 255, 255)
+MemoryLabel.BackgroundTransparency = 1
+MemoryLabel.Size = UDim2.new(0, 0, 1, 0)
+MemoryLabel.Text = "0mb"
+MemoryLabel.AutomaticSize = Enum.AutomaticSize.X
+MemoryLabel.Name = "Memory"
+MemoryLabel.LayoutOrder = 9
+MemoryLabel.Visible = false
+
 -- Переменные для анимации watermark
 
 -- Переменные для обновления FPS/Ping раз в секунду
@@ -1728,6 +2315,74 @@ EXT.makeHudDraggable(WatermarkFrame, "watermark")
 EXT.makeHudDraggable(KeybindList, "keybinds")
 EXT.makeHudDraggable(SpeedLabel, "speed_display")
 EXT.makeHudDraggable(PlayerInfoLabel, "player_info")
+
+-- Performance Graph Widget (в HudScreenGui)
+local PerfGraphFrame = Instance.new("Frame", HudScreenGui)
+PerfGraphFrame.Name = "PerfGraph"
+PerfGraphFrame.Size = UDim2.new(0, 190, 0, 75)
+PerfGraphFrame.Position = UDim2.new(0, 10, 0, 180)
+PerfGraphFrame.BackgroundColor3 = THEME.PANEL_BG
+PerfGraphFrame.BorderSizePixel = 0
+PerfGraphFrame.ClipsDescendants = true
+PerfGraphFrame.Visible = false
+PerfGraphFrame.ZIndex = 90
+Instance.new("UICorner", PerfGraphFrame).CornerRadius = UDim.new(0, 8)
+local perfStroke = Instance.new("UIStroke", PerfGraphFrame)
+perfStroke.Color = THEME.PANEL_STROKE
+perfStroke.Thickness = 1.5
+
+local perfHeader = Instance.new("Frame", PerfGraphFrame)
+perfHeader.Size = UDim2.new(1, 0, 0, 22)
+perfHeader.BackgroundTransparency = 1
+perfHeader.ZIndex = 91
+
+local perfTitle = Instance.new("TextLabel", perfHeader)
+perfTitle.Size = UDim2.new(0.5, 0, 1, 0)
+perfTitle.Position = UDim2.new(0, 8, 0, 0)
+perfTitle.BackgroundTransparency = 1
+perfTitle.Text = "frametime"
+perfTitle.TextColor3 = THEME.TEXT_TITLE
+perfTitle.Font = Enum.Font.GothamBold
+perfTitle.TextSize = 11
+perfTitle.TextXAlignment = Enum.TextXAlignment.Left
+perfTitle.ZIndex = 92
+
+local perfInfo = Instance.new("TextLabel", perfHeader)
+perfInfo.Size = UDim2.new(0.5, -8, 1, 0)
+perfInfo.Position = UDim2.new(0.5, 0, 0, 0)
+perfInfo.BackgroundTransparency = 1
+perfInfo.Text = "60 fps · 0 ms"
+perfInfo.TextColor3 = THEME.TEXT_DIM
+perfInfo.Font = Enum.Font.Gotham
+perfInfo.TextSize = 10
+perfInfo.TextXAlignment = Enum.TextXAlignment.Right
+perfInfo.ZIndex = 92
+
+local perfBarsContainer = Instance.new("Frame", PerfGraphFrame)
+perfBarsContainer.Size = UDim2.new(1, -16, 0, 44)
+perfBarsContainer.Position = UDim2.new(0, 8, 0, 24)
+perfBarsContainer.BackgroundColor3 = THEME.BIND_BG
+perfBarsContainer.BorderSizePixel = 0
+perfBarsContainer.ZIndex = 91
+Instance.new("UICorner", perfBarsContainer).CornerRadius = UDim.new(0, 4)
+
+State.perfBars = {}
+local NUM_PERF_BARS = 28
+local barWidth = 4
+local barSpacing = 2
+for i = 1, NUM_PERF_BARS do
+    local bar = Instance.new("Frame", perfBarsContainer)
+    bar.Size = UDim2.new(0, barWidth, 0.5, 0)
+    bar.Position = UDim2.new(0, (i - 1) * (barWidth + barSpacing) + 3, 1, -1)
+    bar.AnchorPoint = Vector2.new(0, 1)
+    bar.BackgroundColor3 = getClientColor()
+    bar.BorderSizePixel = 0
+    bar.ZIndex = 92
+    Instance.new("UICorner", bar).CornerRadius = UDim.new(0, 1)
+    State.perfBars[i] = bar
+end
+
+EXT.makeHudDraggable(PerfGraphFrame, "perf_graph")
 
 local animationStep = 60
 local targetAnimationStep = 60
@@ -2487,7 +3142,7 @@ local function untrackPlayerEsp(player)
 end
 
 local function refreshTrackedPlayerEsp()
-    for _, player in ipairs(G.Plr:GetPlayers()) do
+    for _, player in ipairs(EXT.getPlayers()) do
         if player.Character then
             ensureTrackedPlayerEsp(player, player.Character)
         end
@@ -2579,7 +3234,11 @@ local MODULE_NAMES = {
     target_strafe_enabled = "Target Strafe",
     orbit_enabled = "Orbit",
     infinite_jump_enabled = "Infinite Jump",
-    freecam_enabled = "Freecam"
+    freecam_enabled = "Freecam",
+    wallhop_enabled = "Wall Hop",
+    edge_jump_enabled = "Edge Jump",
+    step_assist_enabled = "Step Assist",
+    fast_stop_enabled = "Fast Stop"
 }
 
 local function getBindDisplayName(settingKey)
@@ -2730,7 +3389,7 @@ local function hasLineOfSight(targetPart)
     if G.LP.Character then
         table.insert(ignoreList, G.LP.Character)
     end
-    for _, player in ipairs(G.Plr:GetPlayers()) do
+    for _, player in ipairs(EXT.getPlayers()) do
         if player ~= G.LP and player.Character and isFriend(player.Name) then
             table.insert(ignoreList, player.Character)
         end
@@ -2750,7 +3409,7 @@ local function getClosest()
     local bestValue = math.huge
     local mousePos = G.UIS:GetMouseLocation()
     
-    for _, v in pairs(G.Plr:GetPlayers()) do
+    for _, v in pairs(EXT.getPlayers()) do
         if v ~= G.LP and v.Character then
             -- Пропускаем друзей
             if isFriend(v.Name) then
@@ -2847,6 +3506,71 @@ local function getPingSeconds()
     return math.clamp(ms / 1000, 0.015, 0.35)
 end
 
+-- Auto/Ping имеют отдельные фильтры; Manual использует прежний расчёт.
+State.predictionMotion = setmetatable({}, {__mode = "k"})
+State.predictionPing = nil
+
+function EXT.getAdaptivePredictionPing(now)
+    local sample = State.predictionPing
+    if not sample or now - sample.time >= 0.15 then
+        local ping = getPingSeconds()
+        if not sample or now - sample.time > 1 then
+            sample = {value = ping, jitter = 0, time = now}
+            State.predictionPing = sample
+        else
+            local dt = now - sample.time
+            local alpha = 1 - math.exp(-dt / 0.30)
+            local change = math.abs(ping - sample.value)
+            sample.jitter = sample.jitter + (math.min(change, 0.08) - sample.jitter) * alpha
+            sample.value = sample.value + (ping - sample.value) * alpha
+            sample.time = now
+        end
+    end
+    return sample.value, sample.jitter
+end
+
+function EXT.getPredictionMotion(part, velocity, now)
+    local horizontal = Vector3.new(velocity.X, 0, velocity.Z)
+    local speed = horizontal.Magnitude
+    local sample = State.predictionMotion[part]
+    local dt = sample and now - sample.time or 0
+
+    -- Не усредняем скорость между разными персонажами или после паузы.
+    if not sample or sample.character ~= part.Parent or dt > 0.30 then
+        sample = {speed = speed, direction = horizontal, position = part.Position,
+            time = now, character = part.Parent}
+        State.predictionMotion[part] = sample
+    elseif dt >= 1 / 240 then
+        local displacement = (part.Position - sample.position).Magnitude
+        if displacement > math.max(12, velocity.Magnitude * dt * 3 + 4) then
+            -- После телепорта сначала прицеливаемся в новую позицию.
+            sample.speed = speed
+            sample.direction = horizontal
+            sample.position = part.Position
+            sample.time = now
+            return Vector3.new(0, 0, 0), true
+        end
+        local turned = speed > 1 and sample.direction.Magnitude > 1
+            and horizontal.Unit:Dot(sample.direction.Unit) < 0.5
+        if speed < 1 or turned or math.abs(speed - sample.speed) > math.max(8, sample.speed * 0.45) then
+            sample.speed = speed
+        else
+            sample.speed = sample.speed + (speed - sample.speed) * (1 - math.exp(-dt / 0.045))
+        end
+        sample.direction = horizontal
+        sample.position = part.Position
+        sample.time = now
+    end
+
+    if speed < 1 then
+        sample.speed = 0
+        return Vector3.new(0, 0, 0), false
+    end
+    -- Направление берём текущее, сглаживаем только величину скорости.
+    -- При торможении не оставляем длинный вынос от предыдущего спринта.
+    return horizontal.Unit * math.min(sample.speed, speed * 1.10), false
+end
+
 -- modeOverride позволяет считать чужим режимом: Orbit держит собственный
 -- переключатель и не должен зависеть от того, что выбрано в аимботе.
 local function getPredictedPosition(part, modeOverride)
@@ -2867,6 +3591,18 @@ local function getPredictedPosition(part, modeOverride)
     local speed = horizontalVelocity.Magnitude
     local mode = modeOverride or s.prediction_mode or "Auto"
 
+    if mode == "Auto" or mode == "Ping" then
+        if velocity.X ~= velocity.X or velocity.Y ~= velocity.Y or velocity.Z ~= velocity.Z
+            or math.abs(velocity.X) == math.huge or math.abs(velocity.Y) == math.huge
+            or math.abs(velocity.Z) == math.huge then
+            return part.Position
+        end
+        local now = os.clock()
+        local discontinuity
+        horizontalVelocity, discontinuity = EXT.getPredictionMotion(part, velocity, now)
+        if discontinuity then return part.Position end
+    end
+
     -- Если цель стоит на месте (скорость близка к 0), упреждение НЕ применяется,
     -- чтобы прицел не уезжал в сторону и не дрожал на неподвижном игроке
     if speed < 1.0 and math.abs(velocity.Y) < 1.0 then
@@ -2880,45 +3616,25 @@ local function getPredictedPosition(part, modeOverride)
 
     local character = part.Parent
     local humanoid = character:FindFirstChildOfClass("Humanoid")
-    local walkSpeed = (humanoid and humanoid.WalkSpeed > 0) and humanoid.WalkSpeed or 16
-
     local prediction
     if mode == "Auto" then
-        -- АВТОМАТИЧЕСКАЯ АДАПТИВНАЯ ПРЕДИКЦИЯ:
-        -- 1. Базовый расчет от пинга и сетевого интерполяционного буфера Roblox (~100 мс)
-        local ping = getPingSeconds()
-        local basePred = 0.105 + (ping * 0.40)
+        local ping, jitter = EXT.getAdaptivePredictionPing(os.clock())
+        -- Реальная скорость (как Target Speed) задаёт вынос через v * t.
+        -- Не умножаем его повторно на speed/16 или на Humanoid.WalkSpeed.
+        -- Время упреждения адаптируется к сглаженному пингу и его колебаниям.
+        local horizon = math.clamp(0.085 + ping * 0.65 + jitter * 0.35, 0.085, 0.35)
+        prediction = horizon * (s.auto_predict_strength or 1)
 
-        -- 2. Подстройка под скорость цели:
-        -- Стандартная скорость ходьбы (WalkSpeed) в Roblox = 16.
-        -- Если скорость ровно 16 (обычный бег): множитель = 1.0 (идеальное упреждение).
-        -- Если цель бежит быстрее 16 (спринт 24-28, спидкоилы/макросы 32-50+): упреждение
-        -- динамически увеличивается для компенсации повышенного рассинхрона на высокой скорости.
-        -- Если цель двигается медленнее 16 (крадется, замедлена): упреждение пропорционально снижается.
-        local speedScale = 1.0
-        if speed > 16.5 then
-            speedScale = 1.0 + math.clamp((speed - 16) / 70, 0, 0.35)
-        elseif speed < 15.5 and speed >= 1.0 then
-            speedScale = math.clamp(speed / 16, 0.45, 1.0)
-        end
-
-        -- Учитываем нестандартный WalkSpeed персонажа в игре (если игра задает базовую скорость выше/ниже 16)
-        if walkSpeed ~= 16 and walkSpeed > 0 then
-            local wsRatio = math.clamp(walkSpeed / 16, 0.75, 1.35)
-            speedScale = speedScale * (0.5 + 0.5 * wsRatio)
-        end
-
-        prediction = basePred * speedScale * (s.auto_predict_strength or 1)
-
-        -- В упор (< 5 стадов) мягко демпфируем, чтобы прицел в рукопашной не перелетал сквозь цель
-        if distance < 5 then
+        -- В упор мягко демпфируем, чтобы прицел в рукопашной не перелетал сквозь цель
+        local closeRange = tonumber(s.auto_predict_close_range) or 25
+        if closeRange > 0 and distance < closeRange then
+            prediction = prediction * math.clamp(distance / closeRange, 0.40, 1.0)
+        elseif distance < 5 then
             prediction = prediction * math.clamp(distance / 5, 0.40, 1.0)
         end
     elseif mode == "Ping" then
-        prediction = getPingSeconds() * (s.ping_multiplier or 1)
-        if speed > 0 then
-            prediction = prediction * math.clamp(speed / 16, 0.5, 1.5)
-        end
+        local ping, jitter = EXT.getAdaptivePredictionPing(os.clock())
+        prediction = math.clamp(ping + jitter * 0.25, 0.015, 0.35) * (s.ping_multiplier or 1)
     else
         -- Ручной режим (Manual)
         prediction = (s.prediction_amount or 0.13) * 0.5
@@ -2962,7 +3678,7 @@ local function getTargetStrafePlayer()
     local bestPlayer = nil
     local bestScore = math.huge
 
-    for _, player in ipairs(G.Plr:GetPlayers()) do
+    for _, player in ipairs(EXT.getPlayers()) do
         if player ~= G.LP then
             local nameLower = string.lower(player.Name)
             local displayLower = string.lower(player.DisplayName or "")
@@ -3300,7 +4016,7 @@ local function pickTarget(s, myPos)
     -- иначе круг захвата был бы смещён вниз на высоту панели.
     local cursor = EXT.mousePosition(false)
 
-    for _, player in ipairs(G.Plr:GetPlayers()) do
+    for _, player in ipairs(EXT.getPlayers()) do
         if isValidTarget(s, player, myPos) then
             local part = player.Character:FindFirstChild("Head")
                 or player.Character:FindFirstChild("HumanoidRootPart")
@@ -3858,7 +4574,7 @@ function EXT.updateHitboxes()
     local myPos = myRoot and myRoot.Position or (workspace.CurrentCamera and workspace.CurrentCamera.CFrame.Position)
 
     local keep = {}
-    for _, player in ipairs(G.Plr:GetPlayers()) do
+    for _, player in ipairs(EXT.getPlayers()) do
         if shouldAffect(player, s, myPos) then
             local targets = getTargetParts(player.Character, partSetting)
             for _, target in ipairs(targets) do
@@ -4390,8 +5106,9 @@ function CategoryPanel:addModule(moduleName, settingKey, hasSettings)
         settingKey = settingKey,
         expanded = false,
         settings = {},
-        searchEntries = {}, -- {name, frame} для поиска по подпунктам
-        sections = {},      -- заголовки групп, скрываются при поиске
+        searchEntries = {}, -- {name, frame, section} для поиска по подпунктам
+        sections = {},      -- заголовки групп
+        currentSection = nil,
         hasSettings = hasSettings
     }
 
@@ -4480,9 +5197,18 @@ function CategoryPanel:addModule(moduleName, settingKey, hasSettings)
     local glowLayers = EXT.attachModuleGlow(btn)
     local targetScale = 1
     local currentScale = 1
+    local function animateScale()
+        if math.abs(currentScale - targetScale) > 0.001 then
+            currentScale = currentScale + (targetScale - currentScale) * 0.2
+            btnScale.Scale = currentScale
+            return true
+        end
+        return false
+    end
     
     btn.MouseEnter:Connect(function()
         targetScale = 1.03 -- Увеличение на 3%
+        State.moduleScaleAnimations[btn] = animateScale
         EXT.setHoveredModule(btn, glowLayers)
         if getgenv().aim_settings.clickgui_hover_outline then
             -- Обводка загорается цветом клиента и становится толще
@@ -4496,6 +5222,7 @@ function CategoryPanel:addModule(moduleName, settingKey, hasSettings)
     
     btn.MouseLeave:Connect(function()
         targetScale = 1
+        State.moduleScaleAnimations[btn] = animateScale
         EXT.setHoveredModule(nil, glowLayers)
         tw(btnStroke, {
             Color = Color3.fromRGB(100, 100, 100),
@@ -4504,13 +5231,7 @@ function CategoryPanel:addModule(moduleName, settingKey, hasSettings)
         }, 0.15)
     end)
     
-    -- Плавная анимация scale
-    G.RS.RenderStepped:Connect(function()
-        if math.abs(currentScale - targetScale) > 0.001 then
-            currentScale = currentScale + (targetScale - currentScale) * 0.2 -- Плавность
-            btnScale.Scale = currentScale
-        end
-    end)
+    -- Scale обновляется общим циклом только во время самой анимации.
     
     local settingsList = Instance.new("Frame", container)
     settingsList.Size = UDim2.new(1, 0, 1, -34)
@@ -4530,7 +5251,7 @@ function CategoryPanel:addModule(moduleName, settingKey, hasSettings)
             break
         end
     end
-    local indexEntry = {name = moduleName, container = container, module = moduleData}
+    local indexEntry = {name = moduleName, container = container, module = moduleData, panel = self, category = self.name, settingKey = settingKey}
     if foundIndex then
         State.moduleIndex[foundIndex] = indexEntry
     else
@@ -4669,8 +5390,12 @@ function CategoryPanel:addBoolean(moduleData, name, settingKey)
         end
     end)
     
+    local entry = {name = name, frame = frame, section = moduleData.currentSection, settingKey = settingKey, type = "Boolean"}
     table.insert(moduleData.settings, frame)
-    table.insert(moduleData.searchEntries, {name = name, frame = frame})
+    table.insert(moduleData.searchEntries, entry)
+    if moduleData.currentSection then
+        table.insert(moduleData.currentSection.items, entry)
+    end
 end
 
 -- Заголовок группы настроек внутри модуля
@@ -4697,7 +5422,13 @@ function CategoryPanel:addSection(moduleData, title)
     line.BackgroundTransparency = 0.4
     line.BorderSizePixel = 0
 
-    table.insert(moduleData.sections, frame)
+    local sectionData = {
+        frame = frame,
+        title = title,
+        items = {}
+    }
+    table.insert(moduleData.sections, sectionData)
+    moduleData.currentSection = sectionData
     table.insert(moduleData.settings, frame)
     return frame
 end
@@ -4930,6 +5661,7 @@ function CategoryPanel:addColorPicker(moduleData, name, settingKey)
             
             -- Если обновляется цвет клиента, обновляем все цвета в интерфейсе
             if settingKey == "client_color" then
+                getgenv().aim_settings.theme_preset = "Custom"
                 updateAllColors()
             end
             
@@ -5028,8 +5760,12 @@ function CategoryPanel:addColorPicker(moduleData, name, settingKey)
         createColorPicker()
     end)
     
+    local entry = {name = name, frame = frame, section = moduleData.currentSection, settingKey = settingKey, type = "ColorPicker"}
     table.insert(moduleData.settings, frame)
-    table.insert(moduleData.searchEntries, {name = name, frame = frame})
+    table.insert(moduleData.searchEntries, entry)
+    if moduleData.currentSection then
+        table.insert(moduleData.currentSection.items, entry)
+    end
 end
 
 function CategoryPanel:addSlider(moduleData, name, settingKey, min, max, inc)
@@ -5115,6 +5851,9 @@ function CategoryPanel:addSlider(moduleData, name, settingKey, min, max, inc)
             valLbl.Text = string.format(valueFormat, value)
         end
         tw(fill, {Size = UDim2.new(math.clamp((value - min) / (max - min), 0, 1), 0, 1, 0)}, 0.1)
+        if settingKey == "menu_scale" and applyMenuScale then
+            applyMenuScale(value)
+        end
     end
 
     valLbl.FocusLost:Connect(function(enterPressed)
@@ -5189,8 +5928,12 @@ function CategoryPanel:addSlider(moduleData, name, settingKey, min, max, inc)
     valLbl.Text = string.format(valueFormat, startVal)
     fill.Size = UDim2.new(math.clamp((startVal - min) / (max - min), 0, 1), 0, 1, 0)
     
+    local entry = {name = name, frame = frame, section = moduleData.currentSection, settingKey = settingKey, type = "Slider"}
     table.insert(moduleData.settings, frame)
-    table.insert(moduleData.searchEntries, {name = name, frame = frame})
+    table.insert(moduleData.searchEntries, entry)
+    if moduleData.currentSection then
+        table.insert(moduleData.currentSection.items, entry)
+    end
 end
 
 function CategoryPanel:addDropdown(moduleData, name, settingKey, options)
@@ -5224,6 +5967,9 @@ function CategoryPanel:addDropdown(moduleData, name, settingKey, options)
         local nextIndex = (currentIndex % #options) + 1
         getgenv().aim_settings[settingKey] = options[nextIndex]
         valLbl.Text = options[nextIndex]
+        if settingKey == "theme_preset" and applyThemePreset then
+            applyThemePreset(options[nextIndex])
+        end
     end)
 
     registerUIRefresher(function()
@@ -5231,8 +5977,12 @@ function CategoryPanel:addDropdown(moduleData, name, settingKey, options)
         valLbl.TextColor3 = getClientColor()
     end)
     
+    local entry = {name = name, frame = frame, section = moduleData.currentSection, settingKey = settingKey, type = "Dropdown"}
     table.insert(moduleData.settings, frame)
-    table.insert(moduleData.searchEntries, {name = name, frame = frame})
+    table.insert(moduleData.searchEntries, entry)
+    if moduleData.currentSection then
+        table.insert(moduleData.currentSection.items, entry)
+    end
 end
 
 function CategoryPanel:addTextBox(name, settingKey, placeholder)
@@ -5335,8 +6085,12 @@ function CategoryPanel:addModuleTextBox(moduleData, name, settingKey, placeholde
         textBox.Text = tostring(getgenv().aim_settings[settingKey] or "")
     end)
 
+    local entry = {name = name, frame = frame, section = moduleData.currentSection, settingKey = settingKey, type = "TextBox"}
     table.insert(moduleData.settings, frame)
-    table.insert(moduleData.searchEntries, {name = name, frame = frame})
+    table.insert(moduleData.searchEntries, entry)
+    if moduleData.currentSection then
+        table.insert(moduleData.currentSection.items, entry)
+    end
 
     return frame
 end
@@ -5586,8 +6340,8 @@ function EXT.updateNoclip()
     end
 
     if not character then return end
-    for _, part in ipairs(character:GetDescendants()) do
-        if part:IsA("BasePart") and part.CanCollide then
+    for _, part in ipairs(EXT.getCharacterParts(character)) do
+        if part.CanCollide then
             if State.noclip[part] == nil then
                 State.noclip[part] = part.CanCollide
             end
@@ -5635,7 +6389,7 @@ function EXT.updateEspDrawings()
 
     local seen = {}
 
-    for _, player in ipairs(G.Plr:GetPlayers()) do
+    for _, player in ipairs(EXT.getPlayers()) do
         local character = player.Character
         local root = character and character:FindFirstChild("HumanoidRootPart")
         local humanoid = character and character:FindFirstChildOfClass("Humanoid")
@@ -5685,7 +6439,7 @@ function EXT.updateEspDrawings()
                 end
 
                 local color
-                if s.esp_team_color and player.Team then
+                if s.esp_team_color and player.Team and player.Team.TeamColor then
                     color = player.Team.TeamColor.Color
                 else
                     color = s.esp_chams_color
@@ -5900,7 +6654,7 @@ function EXT.refreshFriendsWindow()
 
     -- Все игроки сервера, кроме себя, с фильтром по поиску
     local order = 1
-    for _, player in ipairs(G.Plr:GetPlayers()) do
+    for _, player in ipairs(EXT.getPlayers()) do
         if player ~= G.LP then
             local nameLower = string.lower(player.Name)
             local displayLower = string.lower(player.DisplayName or "")
@@ -5981,54 +6735,551 @@ end)
 
 end -- конец блока EXTENSIONS
 
--- ------------------------------------------------------------ ПОИСК ПО МЕНЮ
+-- ------------------------------------------------------------ ПОИСК ПО МЕНЮ (С АНИМАЦИЕЙ И ПРОКРУТКОЙ)
 do
+local SEARCH_DEFAULT_WIDTH = 270
+local SEARCH_EXPANDED_WIDTH = 360
+
 EXT.SearchBar = Instance.new("Frame", ScreenGui)
 EXT.SearchBar.Name = "ModuleSearch"
-EXT.SearchBar.Size = UDim2.new(0, 260, 0, 30)
-EXT.SearchBar.Position = UDim2.new(0.5, -130, 0, 8)
+EXT.SearchBar.Size = UDim2.new(0, SEARCH_DEFAULT_WIDTH, 0, 32)
+EXT.SearchBar.Position = UDim2.new(0.5, -SEARCH_DEFAULT_WIDTH/2, 0, 8)
 EXT.SearchBar.BackgroundColor3 = THEME.PANEL_BG
 EXT.SearchBar.BorderSizePixel = 0
 EXT.SearchBar.Active = true
+EXT.SearchBar.ClipsDescendants = false -- Выпадающий список результатов не должен обрезаться
 Instance.new("UICorner", EXT.SearchBar).CornerRadius = UDim.new(0, 8)
 
 local searchStroke = Instance.new("UIStroke", EXT.SearchBar)
 searchStroke.Color = THEME.PANEL_STROKE
 searchStroke.Thickness = 1.5
 
+-- Иконка поиска слева
+local searchIcon = Instance.new("ImageLabel", EXT.SearchBar)
+searchIcon.Size = UDim2.new(0, 16, 0, 16)
+searchIcon.Position = UDim2.new(0, 10, 0.5, -8)
+searchIcon.BackgroundTransparency = 1
+searchIcon.Image = "rbxassetid://6031154871"
+searchIcon.ImageColor3 = THEME.TEXT_DIM
+
+-- Текстовое поле поиска
 EXT.SearchBox = Instance.new("TextBox", EXT.SearchBar)
-EXT.SearchBox.Size = UDim2.new(1, -20, 1, -6)
-EXT.SearchBox.Position = UDim2.new(0, 10, 0, 3)
+EXT.SearchBox.Size = UDim2.new(1, -66, 1, 0)
+EXT.SearchBox.Position = UDim2.new(0, 34, 0, 0)
 EXT.SearchBox.BackgroundTransparency = 1
 EXT.SearchBox.Text = ""
-EXT.SearchBox.PlaceholderText = "Search module..."
+EXT.SearchBox.PlaceholderText = "Search module or setting..."
 EXT.SearchBox.TextColor3 = THEME.TEXT_TITLE
 EXT.SearchBox.PlaceholderColor3 = THEME.TEXT_DIM
-EXT.SearchBox.Font = Enum.Font.Gotham
+EXT.SearchBox.Font = Enum.Font.GothamMedium
 EXT.SearchBox.TextSize = 12
+EXT.SearchBox.TextXAlignment = Enum.TextXAlignment.Left
 EXT.SearchBox.ClearTextOnFocus = false
+
+-- Кнопка быстрой очистки (✕)
+local clearBtn = Instance.new("TextButton", EXT.SearchBar)
+clearBtn.Size = UDim2.new(0, 20, 0, 20)
+clearBtn.Position = UDim2.new(1, -26, 0.5, -10)
+clearBtn.BackgroundColor3 = Color3.fromRGB(35, 35, 45)
+clearBtn.AutoButtonColor = false
+clearBtn.Text = "✕"
+clearBtn.TextColor3 = THEME.TEXT_DIM
+clearBtn.Font = Enum.Font.GothamBold
+clearBtn.TextSize = 11
+clearBtn.Visible = false
+Instance.new("UICorner", clearBtn).CornerRadius = UDim.new(0, 10)
+
+clearBtn.MouseEnter:Connect(function()
+    tw(clearBtn, {BackgroundColor3 = Color3.fromRGB(55, 55, 70), TextColor3 = Color3.fromRGB(255, 255, 255)}, 0.15)
+end)
+clearBtn.MouseLeave:Connect(function()
+    tw(clearBtn, {BackgroundColor3 = Color3.fromRGB(35, 35, 45), TextColor3 = THEME.TEXT_DIM}, 0.15)
+end)
+clearBtn.MouseButton1Click:Connect(function()
+    EXT.SearchBox.Text = ""
+    EXT.applyModuleSearch()
+end)
+
+-- Анимация фокуса строки поиска
+EXT.SearchBox.Focused:Connect(function()
+    tw(EXT.SearchBar, {Size = UDim2.new(0, SEARCH_EXPANDED_WIDTH, 0, 34)}, 0.22)
+    tw(searchStroke, {Color = getClientColor(), Thickness = 2}, 0.2)
+    tw(searchIcon, {ImageColor3 = getClientColor()}, 0.2)
+end)
+
+EXT.SearchBox.FocusLost:Connect(function()
+    if (EXT.SearchBox.Text or "") == "" then
+        tw(EXT.SearchBar, {Size = UDim2.new(0, SEARCH_DEFAULT_WIDTH, 0, 32)}, 0.25)
+    end
+    tw(searchStroke, {Color = THEME.PANEL_STROKE, Thickness = 1.5}, 0.2)
+    tw(searchIcon, {ImageColor3 = THEME.TEXT_DIM}, 0.2)
+end)
 
 EXT.makeHudDraggable(EXT.SearchBar, "search_bar")
 
--- Поиск идёт и по названиям модулей, и по их подпунктам.
--- Если совпал подпункт, модуль разворачивается и показывает только его.
+-- ============================================================
+-- ВЫПАДАЮЩИЙ СПИСОК РЕЗУЛЬТАТОВ ПОИСКА С ПРОКРУТКОЙ
+-- ============================================================
+local resultsPopup = Instance.new("Frame", EXT.SearchBar)
+resultsPopup.Name = "SearchResultsPopup"
+resultsPopup.Size = UDim2.new(1, 0, 0, 0)
+resultsPopup.Position = UDim2.new(0, 0, 1, 6)
+resultsPopup.BackgroundColor3 = THEME.PANEL_BG
+resultsPopup.BorderSizePixel = 0
+resultsPopup.ClipsDescendants = true
+resultsPopup.Visible = false
+resultsPopup.ZIndex = 50
+Instance.new("UICorner", resultsPopup).CornerRadius = UDim.new(0, 8)
+
+local popupStroke = Instance.new("UIStroke", resultsPopup)
+popupStroke.Color = THEME.PANEL_STROKE
+popupStroke.Thickness = 1.5
+
+-- Шапка списка результатов
+local popupHeader = Instance.new("Frame", resultsPopup)
+popupHeader.Size = UDim2.new(1, 0, 0, 26)
+popupHeader.BackgroundTransparency = 1
+popupHeader.ZIndex = 51
+
+local headerTitle = Instance.new("TextLabel", popupHeader)
+headerTitle.Size = UDim2.new(0, 120, 1, 0)
+headerTitle.Position = UDim2.new(0, 12, 0, 0)
+headerTitle.BackgroundTransparency = 1
+headerTitle.Text = "SEARCH RESULTS"
+headerTitle.TextColor3 = THEME.TEXT_DIM
+headerTitle.Font = Enum.Font.GothamBold
+headerTitle.TextSize = 10
+headerTitle.TextXAlignment = Enum.TextXAlignment.Left
+headerTitle.ZIndex = 51
+
+local countBadge = Instance.new("TextLabel", popupHeader)
+countBadge.Size = UDim2.new(0, 80, 0, 18)
+countBadge.Position = UDim2.new(1, -90, 0.5, -9)
+countBadge.BackgroundColor3 = Color3.fromRGB(30, 30, 38)
+countBadge.Text = "0 FOUND"
+countBadge.TextColor3 = THEME.TEXT_DIM
+countBadge.Font = Enum.Font.GothamBold
+countBadge.TextSize = 9
+countBadge.ZIndex = 51
+Instance.new("UICorner", countBadge).CornerRadius = UDim.new(0, 6)
+
+local headerDivider = Instance.new("Frame", popupHeader)
+headerDivider.Size = UDim2.new(1, -20, 0, 1)
+headerDivider.Position = UDim2.new(0, 10, 1, -1)
+headerDivider.BackgroundColor3 = THEME.MODULE_STROKE
+headerDivider.BorderSizePixel = 0
+headerDivider.ZIndex = 51
+
+-- ScrollingFrame для результатов поиска с плавной прокруткой
+local scrollList = Instance.new("ScrollingFrame", resultsPopup)
+scrollList.Size = UDim2.new(1, 0, 1, -28)
+scrollList.Position = UDim2.new(0, 0, 0, 28)
+scrollList.BackgroundTransparency = 1
+scrollList.BorderSizePixel = 0
+scrollList.ScrollBarThickness = 3
+scrollList.ScrollBarImageColor3 = getClientColor()
+scrollList.ScrollBarImageTransparency = 0.2
+scrollList.VerticalScrollBarInset = Enum.ScrollBarInset.ScrollBar
+scrollList.ScrollingDirection = Enum.ScrollingDirection.Y
+scrollList.AutomaticCanvasSize = Enum.AutomaticSize.Y
+scrollList.CanvasSize = UDim2.new(0, 0, 0, 0)
+scrollList.ClipsDescendants = true
+scrollList.Active = true
+scrollList.ZIndex = 52
+
+local scrollLayout = Instance.new("UIListLayout", scrollList)
+scrollLayout.SortOrder = Enum.SortOrder.LayoutOrder
+scrollLayout.Padding = UDim.new(0, 4)
+
+local scrollPad = Instance.new("UIPadding", scrollList)
+scrollPad.PaddingLeft = UDim.new(0, 8)
+scrollPad.PaddingRight = UDim.new(0, 8)
+scrollPad.PaddingTop = UDim.new(0, 4)
+scrollPad.PaddingBottom = UDim.new(0, 6)
+
+-- Очистка старых карточек результатов
+local activeResultCards = {}
+local function clearResultCards()
+    for _, card in ipairs(activeResultCards) do
+        pcall(function() card:Destroy() end)
+    end
+    activeResultCards = {}
+end
+
+-- Создание карточки результата в выпадающем списке
+local function createResultCard(entry, matchText, isSubItem, matchedSectionObj)
+    -- Основная карточка (высота 36px в свёрнутом состоянии)
+    local card = Instance.new("Frame", scrollList)
+    card.Size = UDim2.new(1, 0, 0, 36)
+    card.BackgroundColor3 = THEME.MODULE_BG
+    card.BorderSizePixel = 0
+    card.ClipsDescendants = true
+    card.ZIndex = 53
+    Instance.new("UICorner", card).CornerRadius = UDim.new(0, 6)
+
+    local cardStroke = Instance.new("UIStroke", card)
+    cardStroke.Color = THEME.MODULE_STROKE
+    cardStroke.Thickness = 1
+
+    -- Верхняя кликабельная полоса карточки
+    local headerBtn = Instance.new("TextButton", card)
+    headerBtn.Size = UDim2.new(1, 0, 0, 36)
+    headerBtn.Position = UDim2.new(0, 0, 0, 0)
+    headerBtn.BackgroundTransparency = 1
+    headerBtn.AutoButtonColor = false
+    headerBtn.Text = ""
+    headerBtn.ZIndex = 54
+
+    -- Бейдж категории (например, [Combat])
+    local catLabel = Instance.new("TextLabel", headerBtn)
+    catLabel.Size = UDim2.new(0, 68, 0, 20)
+    catLabel.Position = UDim2.new(0, 6, 0.5, -10)
+    catLabel.BackgroundColor3 = Color3.fromRGB(36, 36, 46)
+    catLabel.Text = entry.category or "Module"
+    catLabel.TextColor3 = THEME.TEXT_DIM
+    catLabel.Font = Enum.Font.GothamBold
+    catLabel.TextSize = 9
+    catLabel.ZIndex = 55
+    Instance.new("UICorner", catLabel).CornerRadius = UDim.new(0, 4)
+
+    local titleLabel = Instance.new("TextLabel", headerBtn)
+    titleLabel.Size = UDim2.new(1, -135, 1, 0)
+    titleLabel.Position = UDim2.new(0, 80, 0, 0)
+    titleLabel.BackgroundTransparency = 1
+    titleLabel.TextColor3 = THEME.TEXT_TITLE
+    titleLabel.Font = Enum.Font.GothamMedium
+    titleLabel.TextSize = 12
+    titleLabel.TextXAlignment = Enum.TextXAlignment.Left
+    titleLabel.ZIndex = 55
+
+    if isSubItem and matchText then
+        titleLabel.Text = entry.name .. "  •  " .. matchText
+    else
+        titleLabel.Text = entry.name
+    end
+
+    -- Тумблер / индикатор состояния (ON / OFF)
+    local statePill = Instance.new("TextButton", headerBtn)
+    statePill.Size = UDim2.new(0, 46, 0, 20)
+    statePill.Position = UDim2.new(1, -52, 0.5, -10)
+    statePill.AutoButtonColor = false
+    statePill.Text = ""
+    statePill.ZIndex = 56
+    Instance.new("UICorner", statePill).CornerRadius = UDim.new(0, 10)
+
+    local function updatePill()
+        local isEnabled = entry.settingKey and getgenv().aim_settings[entry.settingKey]
+        if isEnabled then
+            statePill.BackgroundColor3 = getClientColor()
+            statePill.TextColor3 = Color3.fromRGB(255, 255, 255)
+            statePill.Text = "ON"
+            statePill.Font = Enum.Font.GothamBold
+            statePill.TextSize = 10
+        else
+            statePill.BackgroundColor3 = Color3.fromRGB(42, 42, 52)
+            statePill.TextColor3 = THEME.TEXT_DIM
+            statePill.Text = "OFF"
+            statePill.Font = Enum.Font.Gotham
+            statePill.TextSize = 10
+        end
+    end
+    updatePill()
+
+    -- Клик по кнопке ON/OFF переключает модуль
+    statePill.MouseButton1Click:Connect(function()
+        if entry.settingKey then
+            local newState = not getgenv().aim_settings[entry.settingKey]
+            getgenv().aim_settings[entry.settingKey] = newState
+            if entry.module and entry.module.btn then
+                tw(entry.module.btn, {BackgroundColor3 = newState and getClientColor() or THEME.MODULE_BG}, 0.2)
+                EXT.ripple(entry.module.btn)
+            end
+            EXT.notifyToggle(entry.settingKey, newState)
+            updatePill()
+        end
+    end)
+
+    -- Выдвижной контейнер для функций (Drawer)
+    local drawer = Instance.new("Frame", card)
+    drawer.Position = UDim2.new(0, 0, 0, 36)
+    drawer.Size = UDim2.new(1, 0, 0, 0)
+    drawer.BackgroundTransparency = 1
+    drawer.ClipsDescendants = true
+    drawer.Visible = false
+    drawer.ZIndex = 54
+
+    local sep = Instance.new("Frame", drawer)
+    sep.Size = UDim2.new(1, -16, 0, 1)
+    sep.Position = UDim2.new(0, 8, 0, 0)
+    sep.BackgroundColor3 = THEME.MODULE_STROKE
+    sep.BackgroundTransparency = 0.5
+    sep.BorderSizePixel = 0
+    sep.ZIndex = 54
+
+    local subList = Instance.new("Frame", drawer)
+    subList.Size = UDim2.new(1, -16, 1, -5)
+    subList.Position = UDim2.new(0, 8, 0, 4)
+    subList.BackgroundTransparency = 1
+    subList.ZIndex = 54
+
+    local subLayout = Instance.new("UIListLayout", subList)
+    subLayout.SortOrder = Enum.SortOrder.LayoutOrder
+    subLayout.Padding = UDim.new(0, 3)
+
+    local subPad = Instance.new("UIPadding", subList)
+    subPad.PaddingTop = UDim.new(0, 2)
+    subPad.PaddingBottom = UDim.new(0, 4)
+
+    -- Собираем список функций для выдвижного списка:
+    -- 1) Если совпала секция (например, Target Filter) - показываем все функции этой секции
+    -- 2) Иначе, если у модуля есть настройки - показываем настройки модуля
+    local itemsToShow = {}
+    if matchedSectionObj and matchedSectionObj.items and #matchedSectionObj.items > 0 then
+        itemsToShow = matchedSectionObj.items
+    else
+        if matchText and entry.module and entry.module.sections then
+            for _, sec in ipairs(entry.module.sections) do
+                if type(sec) == "table" and sec.title and string.lower(sec.title) == string.lower(matchText) then
+                    itemsToShow = sec.items or {}
+                    break
+                end
+            end
+        end
+        if #itemsToShow == 0 and entry.module and entry.module.searchEntries then
+            itemsToShow = entry.module.searchEntries
+        end
+    end
+
+    -- Заполняем выдвижной контейнер функциями
+    for _, subItem in ipairs(itemsToShow) do
+        local subRow = Instance.new("TextButton", subList)
+        subRow.Size = UDim2.new(1, 0, 0, 26)
+        subRow.BackgroundColor3 = Color3.fromRGB(24, 24, 30)
+        subRow.AutoButtonColor = false
+        subRow.Text = ""
+        subRow.ZIndex = 55
+        Instance.new("UICorner", subRow).CornerRadius = UDim.new(0, 5)
+
+        local subRowStroke = Instance.new("UIStroke", subRow)
+        subRowStroke.Color = THEME.MODULE_STROKE
+        subRowStroke.Thickness = 1
+        subRowStroke.Transparency = 0.5
+
+        local bullet = Instance.new("TextLabel", subRow)
+        bullet.Size = UDim2.new(0, 14, 1, 0)
+        bullet.Position = UDim2.new(0, 8, 0, 0)
+        bullet.BackgroundTransparency = 1
+        bullet.Text = "•"
+        bullet.TextColor3 = getClientColor()
+        bullet.Font = Enum.Font.GothamBold
+        bullet.TextSize = 13
+        bullet.ZIndex = 56
+
+        local subName = Instance.new("TextLabel", subRow)
+        subName.Size = UDim2.new(1, -75, 1, 0)
+        subName.Position = UDim2.new(0, 24, 0, 0)
+        subName.BackgroundTransparency = 1
+        subName.Text = subItem.name or "Setting"
+        subName.TextColor3 = THEME.TEXT_TITLE
+        subName.Font = Enum.Font.GothamMedium
+        subName.TextSize = 11
+        subName.TextXAlignment = Enum.TextXAlignment.Left
+        subName.ZIndex = 56
+
+        local subValPill = Instance.new("TextLabel", subRow)
+        subValPill.Size = UDim2.new(0, 42, 0, 18)
+        subValPill.Position = UDim2.new(1, -48, 0.5, -9)
+        subValPill.ZIndex = 56
+        Instance.new("UICorner", subValPill).CornerRadius = UDim.new(0, 9)
+
+        local function updateSubVal()
+            if subItem.settingKey then
+                local val = getgenv().aim_settings[subItem.settingKey]
+                if type(val) == "boolean" then
+                    if val then
+                        subValPill.BackgroundColor3 = getClientColor()
+                        subValPill.TextColor3 = Color3.fromRGB(255, 255, 255)
+                        subValPill.Text = "ON"
+                        subValPill.Font = Enum.Font.GothamBold
+                        subValPill.TextSize = 9
+                    else
+                        subValPill.BackgroundColor3 = Color3.fromRGB(36, 36, 44)
+                        subValPill.TextColor3 = THEME.TEXT_DIM
+                        subValPill.Text = "OFF"
+                        subValPill.Font = Enum.Font.Gotham
+                        subValPill.TextSize = 9
+                    end
+                elseif type(val) == "number" then
+                    subValPill.BackgroundColor3 = Color3.fromRGB(36, 36, 44)
+                    subValPill.TextColor3 = getClientColor()
+                    subValPill.Text = tostring(math.floor(val * 10) / 10)
+                    subValPill.Font = Enum.Font.GothamBold
+                    subValPill.TextSize = 9
+                else
+                    subValPill.BackgroundColor3 = Color3.fromRGB(36, 36, 44)
+                    subValPill.TextColor3 = THEME.TEXT_TITLE
+                    subValPill.Text = tostring(val or "")
+                    subValPill.Font = Enum.Font.Gotham
+                    subValPill.TextSize = 9
+                end
+            else
+                subValPill.Visible = false
+            end
+        end
+        updateSubVal()
+        registerUIRefresher(updateSubVal)
+
+        -- Hover анимации подпункта
+        subRow.MouseEnter:Connect(function()
+            tw(subRow, {BackgroundColor3 = Color3.fromRGB(32, 32, 42)}, 0.15)
+            tw(subRowStroke, {Color = getClientColor(), Transparency = 0}, 0.15)
+        end)
+        subRow.MouseLeave:Connect(function()
+            tw(subRow, {BackgroundColor3 = Color3.fromRGB(24, 24, 30)}, 0.15)
+            tw(subRowStroke, {Color = THEME.MODULE_STROKE, Transparency = 0.5}, 0.15)
+        end)
+
+        -- Клик по функции внутри списка: переключение и синхронизация
+        subRow.MouseButton1Click:Connect(function()
+            if subItem.settingKey then
+                if type(getgenv().aim_settings[subItem.settingKey]) == "boolean" then
+                    local newState = not getgenv().aim_settings[subItem.settingKey]
+                    getgenv().aim_settings[subItem.settingKey] = newState
+                    updateSubVal()
+                    refreshUIFromSettings()
+                    EXT.notifyToggle(subItem.settingKey, newState)
+                    EXT.ripple(subRow)
+                end
+            end
+
+            -- Прокрутка к этой функции в основной панели
+            if entry.panel and entry.panel.content and subItem.frame then
+                pcall(function()
+                    local targetY = math.max(0, subItem.frame.Position.Y.Offset - 20)
+                    tw(entry.panel.content, {CanvasPosition = Vector2.new(0, targetY)}, 0.25)
+                end)
+            end
+        end)
+    end
+
+    -- Анимация выдвижения / сворачивания по ПКМ
+    local isDrawerOpen = false
+    local drawerContentHeight = math.clamp(#itemsToShow * 29 + 10, 36, 220)
+
+    local function toggleDrawer()
+        if #itemsToShow == 0 then return end
+        isDrawerOpen = not isDrawerOpen
+        if isDrawerOpen then
+            drawer.Visible = true
+            tw(drawer, {Size = UDim2.new(1, 0, 0, drawerContentHeight)}, 0.22, Enum.EasingStyle.Quart, Enum.EasingDirection.Out)
+            tw(card, {Size = UDim2.new(1, 0, 0, 36 + drawerContentHeight)}, 0.22, Enum.EasingStyle.Quart, Enum.EasingDirection.Out)
+        else
+            tw(drawer, {Size = UDim2.new(1, 0, 0, 0)}, 0.2, Enum.EasingStyle.Quad, Enum.EasingDirection.Out)
+            tw(card, {Size = UDim2.new(1, 0, 0, 36)}, 0.2, Enum.EasingStyle.Quad, Enum.EasingDirection.Out)
+            task.delay(0.2, function()
+                if not isDrawerOpen then
+                    drawer.Visible = false
+                end
+            end)
+        end
+    end
+
+    -- ПКМ по карточке или кнопке статуса выдвигает функции
+    headerBtn.MouseButton2Click:Connect(toggleDrawer)
+    statePill.MouseButton2Click:Connect(toggleDrawer)
+
+    -- Hover анимации для всей карточки
+    headerBtn.MouseEnter:Connect(function()
+        tw(card, {BackgroundColor3 = Color3.fromRGB(36, 36, 46)}, 0.15)
+        tw(cardStroke, {Color = getClientColor()}, 0.15)
+    end)
+    headerBtn.MouseLeave:Connect(function()
+        tw(card, {BackgroundColor3 = THEME.MODULE_BG}, 0.15)
+        tw(cardStroke, {Color = THEME.MODULE_STROKE}, 0.15)
+    end)
+
+    -- ЛКМ по заголовку: центрирует панель категории на этом модуле
+    headerBtn.MouseButton1Click:Connect(function()
+        if entry.panel and entry.panel.content and entry.container then
+            pcall(function()
+                local targetY = math.max(0, entry.container.Position.Y.Offset - 20)
+                tw(entry.panel.content, {CanvasPosition = Vector2.new(0, targetY)}, 0.25)
+                if entry.module and entry.module.btn then
+                    local originalBorder = entry.module.btn:FindFirstChildOfClass("UIStroke")
+                    if originalBorder then
+                        tw(originalBorder, {Color = Color3.fromRGB(255, 255, 255), Thickness = 2}, 0.15)
+                        task.delay(0.4, function()
+                            pcall(function()
+                                tw(originalBorder, {Color = Color3.fromRGB(100, 100, 100), Thickness = 1}, 0.25)
+                            end)
+                        end)
+                    end
+                end
+            end)
+        end
+    end)
+
+    table.insert(activeResultCards, card)
+    return card
+end
+
+-- Пустое состояние
+local function createEmptyState(query)
+    local emptyFrame = Instance.new("Frame", scrollList)
+    emptyFrame.Size = UDim2.new(1, 0, 0, 56)
+    emptyFrame.BackgroundTransparency = 1
+    emptyFrame.ZIndex = 53
+
+    local emptyIcon = Instance.new("TextLabel", emptyFrame)
+    emptyIcon.Size = UDim2.new(1, 0, 0, 22)
+    emptyIcon.Position = UDim2.new(0, 0, 0, 4)
+    emptyIcon.BackgroundTransparency = 1
+    emptyIcon.Text = "🔍"
+    emptyIcon.TextColor3 = THEME.TEXT_DIM
+    emptyIcon.Font = Enum.Font.Gotham
+    emptyIcon.TextSize = 16
+    emptyIcon.ZIndex = 54
+
+    local emptyText = Instance.new("TextLabel", emptyFrame)
+    emptyText.Size = UDim2.new(1, 0, 0, 20)
+    emptyText.Position = UDim2.new(0, 0, 0, 28)
+    emptyText.BackgroundTransparency = 1
+    emptyText.Text = 'No matches found for "' .. query .. '"'
+    emptyText.TextColor3 = THEME.TEXT_DIM
+    emptyText.Font = Enum.Font.Gotham
+    emptyText.TextSize = 11
+    emptyText.ZIndex = 54
+
+    table.insert(activeResultCards, emptyFrame)
+end
+
+-- Поиск идёт и по названиям модулей, и по их подпунктам с выпадающим списком и прокруткой.
 function EXT.applyModuleSearch()
     local query = string.lower(EXT.SearchBox.Text or "")
+    clearResultCards()
 
-    for _, entry in ipairs(State.moduleIndex) do
-        local container = entry.container
-        local moduleData = entry.module
+    if query == "" then
+        clearBtn.Visible = false
+        tw(resultsPopup, {Size = UDim2.new(1, 0, 0, 0)}, 0.2)
+        task.delay(0.2, function()
+            if (EXT.SearchBox.Text or "") == "" then
+                resultsPopup.Visible = false
+            end
+        end)
 
-        if container and container.Parent and moduleData then
-            if query == "" then
+        for _, entry in ipairs(State.moduleIndex) do
+            local container = entry.container
+            local moduleData = entry.module
+
+            if container and container.Parent and moduleData then
                 container.Visible = true
                 for _, item in ipairs(moduleData.searchEntries) do
                     item.frame.Visible = true
                 end
                 for _, section in ipairs(moduleData.sections) do
-                    section.Visible = true
+                    local secFrame = (type(section) == "table" and section.frame) or section
+                    secFrame.Visible = true
                 end
-                -- Свернуть обратно только то, что развернул сам поиск
                 if moduleData.searchExpanded then
                     moduleData.searchExpanded = false
                     moduleData.expanded = false
@@ -6037,35 +7288,105 @@ function EXT.applyModuleSearch()
                     end
                     container.Size = UDim2.new(1, -16, 0, 34)
                 end
-            else
-                local nameMatch = string.find(string.lower(entry.name), query, 1, true) ~= nil
-                local settingMatch = false
+            end
+        end
+        return
+    end
 
-                for _, item in ipairs(moduleData.searchEntries) do
-                    local hit = string.find(string.lower(item.name), query, 1, true) ~= nil
-                    item.frame.Visible = nameMatch or hit
-                    if hit then settingMatch = true end
-                end
+    clearBtn.Visible = true
+    scrollList.ScrollBarImageColor3 = getClientColor()
+    local matchCount = 0
 
-                -- При активном поиске заголовки групп прячем: часть
-                -- их содержимого отфильтрована, и они висели бы пустыми
-                for _, section in ipairs(moduleData.sections) do
-                    section.Visible = nameMatch
-                end
+    for _, entry in ipairs(State.moduleIndex) do
+        local container = entry.container
+        local moduleData = entry.module
 
-                container.Visible = nameMatch or settingMatch
+        if container and container.Parent and moduleData then
+            local nameMatch = string.find(string.lower(entry.name), query, 1, true) ~= nil
+            local settingMatch = false
+            local matchedSubText = nil
+            local matchedSectionObj = nil
 
-                if settingMatch and not moduleData.expanded then
-                    moduleData.expanded = true
-                    moduleData.searchExpanded = true
-                    if moduleData.arrowLbl then
-                        moduleData.arrowLbl.Rotation = 90
+            -- Проверяем совпадения по названиям секций
+            local sectionMatched = {}
+            for _, section in ipairs(moduleData.sections) do
+                if type(section) == "table" and section.title then
+                    if string.find(string.lower(section.title), query, 1, true) ~= nil then
+                        sectionMatched[section] = true
+                        settingMatch = true
+                        matchedSubText = section.title
+                        matchedSectionObj = section
                     end
                 end
             end
 
-            -- Высоту считаем на следующем кадре: UIListLayout пересчитывает
-            -- AbsoluteContentSize уже после смены видимости подпунктов.
+            -- Проверяем видимость каждого подпункта
+            for _, item in ipairs(moduleData.searchEntries) do
+                local hit = string.find(string.lower(item.name), query, 1, true) ~= nil
+                local inMatchedSection = item.section and sectionMatched[item.section]
+                local shouldShow = nameMatch or hit or inMatchedSection
+                item.frame.Visible = shouldShow
+                if hit or inMatchedSection then
+                    settingMatch = true
+                    if not matchedSubText then
+                        matchedSubText = item.name
+                        if item.section and type(item.section) == "table" then
+                            matchedSectionObj = item.section
+                        end
+                    end
+                end
+            end
+
+            -- Видимость заголовков секций
+            for _, section in ipairs(moduleData.sections) do
+                local secFrame = (type(section) == "table" and section.frame) or section
+                local showSection = nameMatch
+                if type(section) == "table" then
+                    if sectionMatched[section] then
+                        showSection = true
+                    else
+                        for _, item in ipairs(section.items or {}) do
+                            if item.frame.Visible then
+                                showSection = true
+                                break
+                            end
+                        end
+                    end
+                else
+                    showSection = nameMatch or settingMatch
+                end
+                secFrame.Visible = showSection
+            end
+
+            local isMatch = nameMatch or settingMatch
+            container.Visible = isMatch
+
+            if isMatch then
+                matchCount = matchCount + 1
+                createResultCard(entry, matchedSubText, not nameMatch, matchedSectionObj)
+
+                -- Плавная прокрутка панели категории к найденному модулю
+                if entry.panel and entry.panel.content then
+                    task.defer(function()
+                        pcall(function()
+                            local currentCanvas = entry.panel.content.CanvasPosition
+                            local itemY = container.Position.Y.Offset
+                            if math.abs(currentCanvas.Y - itemY) > 80 then
+                                tw(entry.panel.content, {CanvasPosition = Vector2.new(0, math.max(0, itemY - 15))}, 0.25)
+                            end
+                        end)
+                    end)
+                end
+            end
+
+            if settingMatch and not moduleData.expanded then
+                moduleData.expanded = true
+                moduleData.searchExpanded = true
+                if moduleData.arrowLbl then
+                    moduleData.arrowLbl.Rotation = 90
+                end
+            end
+
             if moduleData.expanded and container.Visible then
                 task.defer(function()
                     if container and container.Parent and moduleData.expanded then
@@ -6076,6 +7397,17 @@ function EXT.applyModuleSearch()
             end
         end
     end
+
+    countBadge.Text = tostring(matchCount) .. " FOUND"
+    countBadge.TextColor3 = (matchCount > 0) and getClientColor() or THEME.TEXT_DIM
+
+    if matchCount == 0 then
+        createEmptyState(query)
+    end
+
+    resultsPopup.Visible = true
+    local targetHeight = (matchCount == 0) and 90 or math.clamp(32 + matchCount * 40, 72, 260)
+    tw(resultsPopup, {Size = UDim2.new(1, 0, 0, targetHeight)}, 0.22, Enum.EasingStyle.Quart, Enum.EasingDirection.Out)
 end
 
 EXT.SearchBox:GetPropertyChangedSignal("Text"):Connect(EXT.applyModuleSearch)
@@ -6422,6 +7754,7 @@ EXT.styleCard(KeybindList, 10)
 EXT.styleCard(SpeedLabel, 8)
 EXT.styleCard(PlayerInfoLabel, 8)
 EXT.styleCard(TargetHudFrame, 10)
+EXT.styleCard(PerfGraphFrame, 8)
 
 -- Текст в карточках должен отступать от акцентной полосы.
 -- Отступ задаётся до создания полосок: addAccent читает UIPadding карточки.
@@ -6465,7 +7798,8 @@ EXT.accents = {
     watermark = addAccent(WatermarkFrame),
     keybinds = addAccent(KeybindList),
     speed = addAccent(SpeedLabel),
-    playerInfo = addAccent(PlayerInfoLabel)
+    playerInfo = addAccent(PlayerInfoLabel),
+    perfGraph = addAccent(PerfGraphFrame)
 }
 
 EXT.sessionStart = tick()
@@ -6502,6 +7836,7 @@ EXT.DEFAULT_POSITIONS = {
     keybinds = UDim2.new(1, -190, 0, 10),
     speed_display = UDim2.new(0.5, -125, 0, 10),
     player_info = UDim2.new(0, 10, 1, -70),
+    perf_graph = UDim2.new(0, 10, 0, 180),
     arraylist = UDim2.new(1, -230, 0, 46),
     notifications = UDim2.new(1, -280, 0, 240),
     friends_window = UDim2.new(0.5, -150, 0.5, -190),
@@ -6707,12 +8042,9 @@ end
 end
 
 -- ============================================================================
--- [[ MOUSE GLOW ]] Свечение у курсора в стиле liquid glass.
--- Лежит в собственном ScreenGui с DisplayOrder выше меню (100) и HUD (50),
--- иначе панели скрипта рисуются поверх свечения и его не видно.
---
--- Стекло собрано из слоёв, потому что настоящего блюра под элементом
--- Roblox UI не даёт: тело + вертикальный градиент + блик + светлая кромка.
+-- [[ MOUSE GLOW ]] Liquid Glass: прозрачная линза с мягкой кромкой и бликом.
+-- Слои создаются один раз: плавное радиальное затухание без внешних текстур.
+-- Размер, растяжение, режимы показа и цвет берутся из прежних настроек.
 -- ============================================================================
 do
 
@@ -6728,128 +8060,148 @@ if syn and syn.protect_gui then pcall(syn.protect_gui, EXT.GlowGui) end
 EXT.MouseGlow = Instance.new("Frame", EXT.GlowGui)
 EXT.MouseGlow.Name = "MouseGlow"
 EXT.MouseGlow.AnchorPoint = Vector2.new(0.5, 0.5)
-EXT.MouseGlow.Size = UDim2.new(0, 0, 0, 0)
 EXT.MouseGlow.BackgroundTransparency = 1
 EXT.MouseGlow.BorderSizePixel = 0
 EXT.MouseGlow.Visible = false
 EXT.MouseGlow.ZIndex = 900
 
--- Внешний ореол: мягкое цветное свечение вокруг стекла
-local halo = Instance.new("Frame", EXT.MouseGlow)
-halo.Name = "Halo"
-halo.AnchorPoint = Vector2.new(0.5, 0.5)
-halo.Position = UDim2.new(0.5, 0, 0.5, 0)
-halo.Size = UDim2.new(1.45, 0, 1.45, 0)
-halo.BackgroundColor3 = getClientColor()
-halo.BackgroundTransparency = 1
-halo.BorderSizePixel = 0
-halo.ZIndex = 899
-Instance.new("UICorner", halo).CornerRadius = UDim.new(1, 0)
+-- Вложенные полупрозрачные диски складываются в мягкий радиальный профиль.
+-- На краю прозрачность стремится к 1; жёсткого контура нет.
+local function createSoftLayers(parent, name, count, zIndex)
+    local layers = {}
+    for i = 1, count do
+        local radius = (count - i + 1) / count
+        local innerRadius = (count - i) / count
+        local outerAlpha = (1 - radius * radius) ^ 3
+        local innerAlpha = (1 - innerRadius * innerRadius) ^ 3
+        local layer = Instance.new("Frame")
+        layer.Name = name .. i
+        layer.AnchorPoint = Vector2.new(0.5, 0.5)
+        layer.Position = UDim2.fromScale(0.5, 0.5)
+        layer.Size = UDim2.fromScale(radius, radius)
+        layer.BackgroundTransparency = 1
+        layer.BorderSizePixel = 0
+        layer.ZIndex = zIndex
+        Instance.new("UICorner", layer).CornerRadius = UDim.new(1, 0)
+        layer.Parent = parent
+        layers[i] = {frame = layer, outerAlpha = outerAlpha, innerAlpha = innerAlpha}
+    end
+    return layers
+end
 
--- Тело стекла
-local body = Instance.new("Frame", EXT.MouseGlow)
-body.Name = "Body"
-body.AnchorPoint = Vector2.new(0.5, 0.5)
-body.Position = UDim2.new(0.5, 0, 0.5, 0)
-body.Size = UDim2.new(1, 0, 1, 0)
-body.BackgroundColor3 = Color3.fromRGB(255, 255, 255)
-body.BackgroundTransparency = 1
-body.BorderSizePixel = 0
-body.ZIndex = 900
-Instance.new("UICorner", body).CornerRadius = UDim.new(1, 0)
+local haloLayers = createSoftLayers(EXT.MouseGlow, "SoftHalo", 24, 900)
+local core = Instance.new("Frame", EXT.MouseGlow)
+core.Name = "SoftCore"
+core.AnchorPoint = Vector2.new(0.5, 0.5)
+core.Position = UDim2.fromScale(0.5, 0.5)
+core.BackgroundTransparency = 1
+core.BorderSizePixel = 0
+core.ZIndex = 901
+local coreLayers = createSoftLayers(core, "Core", 12, 901)
 
--- Вертикальный градиент: сверху стекло светлее, снизу уходит в цвет клиента
-local bodyGradient = Instance.new("UIGradient", body)
-bodyGradient.Rotation = 90
+-- Стеклянная поверхность отдельна от Neon: тонкие отражения по краям,
+-- прозрачный центр и спокойный блик, встроенный в поверхность линзы.
+local glass = Instance.new("Frame", EXT.MouseGlow)
+glass.Name = "GlassLens"
+glass.AnchorPoint = Vector2.new(0.5, 0.5)
+glass.Position = UDim2.fromScale(0.5, 0.5)
+glass.Size = UDim2.fromScale(0.90, 0.90)
+glass.BackgroundColor3 = Color3.new(1, 1, 1)
+glass.BackgroundTransparency = 1
+glass.BorderSizePixel = 0
+glass.ZIndex = 901
+Instance.new("UICorner", glass).CornerRadius = UDim.new(1, 0)
 
--- Светлая кромка с переменной прозрачностью - имитация преломления по краю
-local rim = Instance.new("UIStroke", body)
-rim.Color = Color3.fromRGB(255, 255, 255)
-rim.Thickness = 1.4
-rim.Transparency = 1
-
-local rimGradient = Instance.new("UIGradient", rim)
-rimGradient.Transparency = NumberSequence.new({
-    NumberSequenceKeypoint.new(0.00, 0.15),
-    NumberSequenceKeypoint.new(0.35, 0.65),
-    NumberSequenceKeypoint.new(0.65, 0.85),
-    NumberSequenceKeypoint.new(1.00, 0.25)
+local glassGradient = Instance.new("UIGradient", glass)
+glassGradient.Transparency = NumberSequence.new({
+    NumberSequenceKeypoint.new(0, 0.08),
+    NumberSequenceKeypoint.new(0.22, 0.55),
+    NumberSequenceKeypoint.new(0.52, 0.92),
+    NumberSequenceKeypoint.new(0.78, 0.72),
+    NumberSequenceKeypoint.new(1, 0.35)
 })
 
--- Блик в левой верхней четверти
-local specular = Instance.new("Frame", EXT.MouseGlow)
-specular.Name = "Specular"
-specular.AnchorPoint = Vector2.new(0.5, 0.5)
-specular.Position = UDim2.new(0.34, 0, 0.30, 0)
-specular.Size = UDim2.new(0.42, 0, 0.30, 0)
-specular.BackgroundColor3 = Color3.fromRGB(255, 255, 255)
-specular.BackgroundTransparency = 1
-specular.BorderSizePixel = 0
-specular.Rotation = -25
-specular.ZIndex = 901
-Instance.new("UICorner", specular).CornerRadius = UDim.new(1, 0)
-
-local specGradient = Instance.new("UIGradient", specular)
-specGradient.Rotation = 90
-specGradient.Transparency = NumberSequence.new({
-    NumberSequenceKeypoint.new(0, 0.25),
-    NumberSequenceKeypoint.new(1, 1)
+local glassRim = Instance.new("UIStroke", glass)
+glassRim.Color = Color3.new(1, 1, 1)
+glassRim.Thickness = 1
+glassRim.Transparency = 1
+local glassRimGradient = Instance.new("UIGradient", glassRim)
+glassRimGradient.Transparency = NumberSequence.new({
+    NumberSequenceKeypoint.new(0, 0.02),
+    NumberSequenceKeypoint.new(0.18, 0.30),
+    NumberSequenceKeypoint.new(0.42, 0.92),
+    NumberSequenceKeypoint.new(0.68, 0.98),
+    NumberSequenceKeypoint.new(0.88, 0.65),
+    NumberSequenceKeypoint.new(1, 0.25)
 })
 
--- Точка в центре
-local dot = Instance.new("Frame", EXT.MouseGlow)
-dot.Name = "Dot"
-dot.AnchorPoint = Vector2.new(0.5, 0.5)
-dot.Position = UDim2.new(0.5, 0, 0.5, 0)
-dot.Size = UDim2.new(0, 5, 0, 5)
-dot.BackgroundColor3 = Color3.fromRGB(255, 255, 255)
-dot.BackgroundTransparency = 1
-dot.BorderSizePixel = 0
-dot.ZIndex = 903
-Instance.new("UICorner", dot).CornerRadius = UDim.new(1, 0)
+local innerGlass = Instance.new("Frame", glass)
+innerGlass.Name = "InnerReflection"
+innerGlass.AnchorPoint = Vector2.new(0.5, 0.5)
+innerGlass.Position = UDim2.fromScale(0.5, 0.5)
+innerGlass.Size = UDim2.new(1, -3, 1, -3)
+innerGlass.BackgroundTransparency = 1
+innerGlass.BorderSizePixel = 0
+innerGlass.ZIndex = 901
+Instance.new("UICorner", innerGlass).CornerRadius = UDim.new(1, 0)
+local innerRim = Instance.new("UIStroke", innerGlass)
+innerRim.Color = Color3.new(1, 1, 1)
+innerRim.Thickness = 0.6
+innerRim.Transparency = 1
+local innerRimGradient = Instance.new("UIGradient", innerRim)
+innerRimGradient.Transparency = NumberSequence.new({
+    NumberSequenceKeypoint.new(0, 0.15),
+    NumberSequenceKeypoint.new(0.30, 0.94),
+    NumberSequenceKeypoint.new(0.70, 1),
+    NumberSequenceKeypoint.new(1, 0.45)
+})
+
+local function updateSoftLayers(layers, color, opacity, recolor)
+    for _, layer in ipairs(layers) do
+        if recolor then layer.frame.BackgroundColor3 = color end
+        -- Композиция дисков даёт заданную непрозрачность в каждом кольце.
+        layer.frame.BackgroundTransparency = (1 - opacity * layer.innerAlpha)
+            / (1 - opacity * layer.outerAlpha)
+    end
+end
 
 local amount = 0
 local hue = 0
+local clock = 0
 local prevPos = nil
-local smoothVel = Vector2.new(0, 0)
+local smoothVel = Vector2.zero
 local lastAngle = 0
+local previousColor = nil
+local previousCoreColor = nil
+local previousGlassColor = nil
 
 function EXT.updateMouseGlow(dt)
     local s = getgenv().aim_settings
-
     local active = s.mouse_glow
     if active then
         if s.mouse_glow_on_hover then
-            -- Появляется только над модулем
             active = ScreenGui.Enabled and EXT.isModuleHovered()
         else
             active = ScreenGui.Enabled or s.mouse_glow_always
         end
     end
 
-    amount = amount + ((active and 1 or 0) - amount) * math.clamp(dt * 12, 0, 1)
-
+    dt = math.max(dt or 0, 0)
+    amount = amount + ((active and 1 or 0) - amount) * (1 - math.exp(-12 * dt))
     if amount < 0.01 then
-        if EXT.MouseGlow.Visible then
-            EXT.MouseGlow.Visible = false
-        end
+        EXT.MouseGlow.Visible = false
+        prevPos = nil
+        smoothVel = Vector2.zero
         return
     end
-
     EXT.MouseGlow.Visible = true
+    clock = clock + dt
 
-    -- Без интерполяции: свечение должно стоять ровно в курсоре
     local target = EXT.mousePosition(EXT.GlowGui.IgnoreGuiInset)
-
-    -- Скорость курсора: по ней капля вытягивается в сторону движения.
-    -- Сглаживаем саму скорость, а не позицию, иначе свечение начало бы
-    -- отставать от курсора, чего мы как раз избегаем.
-    local velocity = Vector2.new(0, 0)
-    if prevPos and dt > 0 then
-        velocity = (target - prevPos) / dt
-    end
+    local velocity = Vector2.zero
+    if prevPos and dt > 0 then velocity = (target - prevPos) / dt end
     prevPos = target
-    smoothVel = smoothVel:Lerp(velocity, math.clamp(dt * 14, 0, 1))
+    smoothVel = smoothVel:Lerp(velocity, 1 - math.exp(-14 * dt))
 
     local color
     if s.mouse_glow_rainbow then
@@ -6858,71 +8210,61 @@ function EXT.updateMouseGlow(dt)
     else
         color = getClientColor()
     end
-
-    local base = (s.mouse_glow_size or 40) * amount
     local liquid = s.mouse_glow_style == "Liquid Glass"
-
-    -- Разные частоты по осям дают легкую "жидкую" деформацию капли
-    local wobbleX, wobbleY = 1, 1
-    if liquid then
-        wobbleX = 1 + math.sin(tick() * 2.3) * 0.06
-        wobbleY = 1 + math.sin(tick() * 3.1 + 1.2) * 0.06
-    else
-        local pulse = 1 + math.sin(tick() * 3) * 0.05
-        wobbleX, wobbleY = pulse, pulse
-    end
-
-    -- Направленная деформация: вдоль движения растягиваем, поперёк сжимаем
     local strength = s.mouse_glow_stretch or 1
     local speed = smoothVel.Magnitude
     local stretch = 1 + math.clamp(speed / 2600, 0, 0.5) * strength
     local squash = 1 - math.clamp(speed / 3800, 0, 0.28) * strength
-
     if speed > 25 then
-        lastAngle = math.deg(math.atan2(smoothVel.Y, smoothVel.X))
+        -- Интерполяция по кратчайшей дуге убирает резкие развороты ореола.
+        local angle = math.deg(math.atan2(smoothVel.Y, smoothVel.X))
+        local delta = (angle - lastAngle + 180) % 360 - 180
+        lastAngle = lastAngle + delta * (1 - math.exp(-18 * dt))
     end
+
+    local breath = 1 + math.sin(clock * 2.3) * (liquid and 0.025 or 0.035)
+    local base = (s.mouse_glow_size or 40) * (0.94 + 0.06 * amount) * breath
+    EXT.MouseGlow.Position = UDim2.fromOffset(target.X, target.Y)
+    EXT.MouseGlow.Size = UDim2.fromOffset(base * stretch, base * squash)
     EXT.MouseGlow.Rotation = lastAngle
 
-    EXT.MouseGlow.Position = UDim2.new(0, target.X, 0, target.Y)
-    EXT.MouseGlow.Size = UDim2.new(0, base * wobbleX * stretch, 0, base * wobbleY * squash)
-
-    halo.BackgroundColor3 = color
-    halo.BackgroundTransparency = 1 - (liquid and 0.07 or 0.14) * amount
-
+    local coreColor = liquid and color:Lerp(Color3.new(1, 1, 1), 0.85)
+        or color:Lerp(Color3.new(1, 1, 1), 0.55)
+    updateSoftLayers(haloLayers, color, (liquid and 0.10 or 0.40) * amount,
+        color ~= previousColor)
+    glass.Visible = liquid
     if liquid then
-        -- Матовое стекло: светлое по всей площади. Тёмного конца у градиента
-        -- быть не должно, иначе по краю ездит тёмный полумесяц.
-        body.BackgroundTransparency = 1 - (0.16 * amount)
-        bodyGradient.Color = ColorSequence.new({
-            ColorSequenceKeypoint.new(0, Color3.fromRGB(255, 255, 255)),
-            ColorSequenceKeypoint.new(1, tintColor(color, 1, 0.55))
-        })
-        bodyGradient.Transparency = NumberSequence.new({
-            NumberSequenceKeypoint.new(0, 0.42),
-            NumberSequenceKeypoint.new(1, 0.78)
-        })
-        -- Градиент не вращается: он задаёт постоянное освещение сверху,
-        -- лёгкое покачивание оставляет ощущение живой поверхности.
-        bodyGradient.Rotation = 90 + math.sin(tick() * 1.1) * 7
-        rimGradient.Rotation = (tick() * 28) % 360
-        rim.Transparency = 1 - (0.75 * amount)
-        rim.Thickness = 1.2
-
-        specular.BackgroundTransparency = 1 - (0.5 * amount)
-        -- Компенсируем поворот родителя, чтобы блик оставался сверху слева
-        specular.Rotation = -25 - lastAngle + math.sin(tick() * 1.7) * 6
-    else
-        body.BackgroundTransparency = 1 - (0.4 * amount)
-        bodyGradient.Color = ColorSequence.new(color)
-        bodyGradient.Transparency = NumberSequence.new(0)
-        rim.Transparency = 1 - (0.7 * amount)
-        rim.Thickness = 1.2 + math.sin(tick() * 5) * 0.35
-        specular.BackgroundTransparency = 1
+        if color ~= previousGlassColor then
+            glassGradient.Color = ColorSequence.new({
+                ColorSequenceKeypoint.new(0, Color3.new(1, 1, 1)),
+                ColorSequenceKeypoint.new(0.55, color:Lerp(Color3.new(1, 1, 1), 0.88)),
+                ColorSequenceKeypoint.new(1, color:Lerp(Color3.new(1, 1, 1), 0.65))
+            })
+            previousGlassColor = color
+        end
+        glass.BackgroundTransparency = 1 - 0.18 * amount
+        glassRim.Transparency = 1 - 0.38 * amount
+        innerRim.Transparency = 1 - 0.12 * amount
+        -- Свет остаётся сверху слева при развороте линзы по движению мыши.
+        local lightingAngle = 65 - lastAngle + math.sin(clock * 1.2) * 4
+        glassGradient.Rotation = lightingAngle
+        glassRimGradient.Rotation = lightingAngle
+        innerRimGradient.Rotation = lightingAngle + 15
     end
+    previousColor = color
 
-    local dotSize = (s.mouse_glow_dot or 5) * amount
-    dot.Size = UDim2.new(0, dotSize, 0, dotSize)
-    dot.BackgroundTransparency = 1 - (0.95 * amount)
+    -- Маленький размытый центр вместо резкой белой точки и плавающего блика.
+    local dotSize = math.max(s.mouse_glow_dot or 5, 0)
+    core.Visible = dotSize > 0
+    if core.Visible then
+        local size = dotSize * 2.4
+        -- Компенсируем вытягивание родителя: центр остаётся круглым.
+        core.Size = UDim2.fromScale(size / math.max(base * stretch, 0.01),
+            size / math.max(base * squash, 0.01))
+        updateSoftLayers(coreLayers, coreColor, (liquid and 0.66 or 0.78) * amount,
+            coreColor ~= previousCoreColor)
+        previousCoreColor = coreColor
+    end
 end
 
 end
@@ -7054,6 +8396,7 @@ end
 -- Функция для обновления анимации панелей
 local function updatePanelAnimation(deltaTime)
     local animationMode = getgenv().aim_settings.clickgui_animation
+    local userScale = getgenv().aim_settings.menu_scale or 1
     
     if panelAnimationState == "showing" then
         panelAnimationProgress = panelAnimationProgress + deltaTime * 4 -- Скорость анимации
@@ -7063,7 +8406,7 @@ local function updatePanelAnimation(deltaTime)
             panelAnimationState = "visible"
             for i, panel in ipairs(State.panels) do
                 setPanelTopLeftLayout(panel, panelOriginalPositions[i])
-                panel.uiScale.Scale = 1
+                panel.uiScale.Scale = userScale
                 panel.frame.BackgroundTransparency = 0
             end
             return
@@ -7093,7 +8436,7 @@ local function updatePanelAnimation(deltaTime)
                 )
                 
                 -- Сбрасываем scale и transparency для режима First
-                panel.uiScale.Scale = 1
+                panel.uiScale.Scale = userScale
                 panel.frame.BackgroundTransparency = 0
             end
         else -- animationMode == "Two"
@@ -7119,7 +8462,7 @@ local function updatePanelAnimation(deltaTime)
                     scale = 1.1 - secondHalf * 0.1
                 end
                 
-                panel.uiScale.Scale = scale
+                panel.uiScale.Scale = scale * userScale
                 panel.frame.BackgroundTransparency = math.max(0, 1 - easedProgress * 2)
                 
                 setPanelCenteredLayout(panel, panelOriginalPositions[i])
@@ -7159,7 +8502,7 @@ local function updatePanelAnimation(deltaTime)
                     panelOriginalPositions[i].Y.Offset
                 )
                 
-                panel.uiScale.Scale = 1
+                panel.uiScale.Scale = userScale
                 panel.frame.BackgroundTransparency = 0
             end
         else -- animationMode == "Two"
@@ -7185,7 +8528,7 @@ local function updatePanelAnimation(deltaTime)
                     scale = 1.1 - shrinkProgress * 0.8
                 end
                 
-                panel.uiScale.Scale = scale
+                panel.uiScale.Scale = scale * userScale
                 
                 setPanelCenteredLayout(panel, panelOriginalPositions[i])
                 
@@ -7231,7 +8574,7 @@ pCombat:addSection(M.Aimbot, "Prediction")
 pCombat:addBoolean(M.Aimbot, "Prediction", "prediction_enabled")
 pCombat:addDropdown(M.Aimbot, "Prediction Mode", "prediction_mode", {"Auto", "Ping", "Manual"})
 pCombat:addSlider(M.Aimbot, "Auto Strength", "auto_predict_strength", 0.2, 3, 0.1)
-pCombat:addSlider(M.Aimbot, "Ping Multiplier", "ping_multiplier", 0.2, 3, 0.1)
+pCombat:addSlider(M.Aimbot, "Strength", "ping_multiplier", 0.2, 3, 0.1)
 pCombat:addSlider(M.Aimbot, "Predict Amount", "prediction_amount", 0, 0.5, 0.01)
 
 pCombat:addSection(M.Aimbot, "Aim Assist")
@@ -7312,12 +8655,16 @@ pVisuals:addModule("Friend Markers", "friend_markers", false)
 M.HUD = pVisuals:addModule("HUD", "hud_enabled", true)
 pVisuals:addSection(M.HUD, "Elements")
 pVisuals:addBoolean(M.HUD, "Watermark", "watermark_enabled")
+pVisuals:addBoolean(M.HUD, "Watermark Memory", "watermark_memory_enabled")
 pVisuals:addBoolean(M.HUD, "Keybind List", "keybind_list_enabled")
 pVisuals:addBoolean(M.HUD, "Player Info", "player_info_enabled")
+pVisuals:addBoolean(M.HUD, "Performance Graph", "perf_graph_enabled")
 
 pVisuals:addSection(M.HUD, "Style")
 pVisuals:addBoolean(M.HUD, "Accent Stripes", "hud_accents")
 pVisuals:addColorPicker(M.HUD, "Client Color", "client_color")
+pVisuals:addDropdown(M.HUD, "Theme Preset", "theme_preset", {"Custom", "Crimson", "Cyberpunk", "Violet", "Nord", "Emerald", "Sunset"})
+pVisuals:addSlider(M.HUD, "Menu Scale", "menu_scale", 0.75, 1.35, 0.05)
 pVisuals:addModule("Rainbow FOV", "rainbow_fov", false)
 pVisuals:addModule("Rainbow Crosshair", "rainbow_crosshair", false)
 M.WorldTweaks = pVisuals:addModule("World Tweaks", "world_tweaks_enabled", true)
@@ -7467,6 +8814,21 @@ pMove:addDropdown(M.Fly, "Bypass Mode", "fly_bypass_mode", {"Velocity", "Telepor
 M.Clumsy = pMove:addModule("Clumsy", "clumsy_enabled", true)
 pMove:addSlider(M.Clumsy, "Speed", "clumsy_speed", 10, 100, 5)
 pMove:addBoolean(M.Clumsy, "Visualize", "clumsy_visualize")
+M.WallHop = pMove:addModule("Wall Hop", "wallhop_enabled", true)
+pMove:addSection(M.WallHop, "Assist")
+pMove:addSlider(M.WallHop, "Power", "wallhop_power", 20, 100, 5)
+pMove:addSlider(M.WallHop, "Cooldown", "wallhop_cooldown", 0.05, 0.5, 0.05)
+pMove:addBoolean(M.WallHop, "Auto Jump", "wallhop_auto")
+pMove:addBoolean(M.WallHop, "Camera Flick", "wallhop_camera_flick")
+pMove:addSlider(M.WallHop, "Flick Angle", "wallhop_flick_angle", 30, 90, 5)
+M.EdgeJump = pMove:addModule("Edge Jump", "edge_jump_enabled", true)
+pMove:addSlider(M.EdgeJump, "Distance", "edge_jump_distance", 1.0, 4.0, 0.2)
+pMove:addSlider(M.EdgeJump, "Cooldown", "edge_jump_cooldown", 0.1, 0.5, 0.05)
+M.StepAssist = pMove:addModule("Step Assist", "step_assist_enabled", true)
+pMove:addDropdown(M.StepAssist, "Mode", "step_assist_mode", {"Instant", "Smooth"})
+pMove:addSlider(M.StepAssist, "Height", "step_assist_height", 1.0, 4.0, 0.25)
+M.FastStop = pMove:addModule("Fast Stop", "fast_stop_enabled", true)
+pMove:addSlider(M.FastStop, "Strength", "fast_stop_strength", 0.5, 1.0, 0.05)
 table.insert(State.panels, pMove)
 
 -- 4. MISC
@@ -7632,7 +8994,6 @@ end
 
 -- Добавляем элементы в категорию Config
 -- TextBox для имени конфига
-pConfig:addTextBox("Config Name", "config_name", "Enter name...")
 
 local updateConfigList
 local reloadConfigsFromDisk, saveConfig, loadConfig, deleteConfig, getConfigsList
@@ -7642,12 +9003,12 @@ reloadConfigsFromDisk = function()
     configList = {}
     
     if not ensureConfigFolder() then
-        return false, "Exploit filesystem API недоступен"
+        return false, "Filesystem access is unavailable"
     end
     
     local ok, files = pcall(listfiles, CONFIG_FOLDER)
     if not ok or type(files) ~= "table" then
-        return false, "Не удалось прочитать папку конфигов"
+        return false, "Could not read the config folder"
     end
     
     for _, path in ipairs(files) do
@@ -7676,10 +9037,10 @@ end
 
 saveConfig = function(name)
     if not name or name:gsub("%s", "") == "" then
-        return false, "Имя конфига не может быть пустым"
+        return false, "Config name cannot be empty"
     end
     if not ensureConfigFolder() then
-        return false, "Exploit filesystem API недоступен"
+        return false, "Filesystem access is unavailable"
     end
     
     local encodedName = encodeConfigName(name)
@@ -7695,7 +9056,7 @@ saveConfig = function(name)
         }))
     end)
     if not writeOk then
-        return false, "Ошибка сохранения конфига: " .. tostring(writeErr)
+        return false, "Could not save config: " .. tostring(writeErr)
     end
     
     configList[encodedName] = {
@@ -7705,13 +9066,13 @@ saveConfig = function(name)
         path = filePath
     }
     
-    return true, "Конфиг '" .. name .. "' сохранен"
+    return true, "Config '" .. name .. "' saved"
 end
 
 loadConfig = function(encodedName)
     reloadConfigsFromDisk()
     if not configList[encodedName] then
-        return false, "Конфиг не найден"
+        return false, "Config not found"
     end
     
     local config = configList[encodedName]
@@ -7771,16 +9132,16 @@ loadConfig = function(encodedName)
     updateAllColors()
     EXT.applySavedPositions()
     
-    return true, "Конфиг '" .. config.name .. "' загружен"
+    return true, "Config '" .. config.name .. "' loaded"
 end
 
 deleteConfig = function(encodedName)
     reloadConfigsFromDisk()
     if not configList[encodedName] then
-        return false, "Конфиг не найден"
+        return false, "Config not found"
     end
     if type(delfile) ~= "function" then
-        return false, "Exploit API не поддерживает удаление файлов"
+        return false, "File deletion is unavailable"
     end
     
     local configName = configList[encodedName].name
@@ -7789,11 +9150,11 @@ deleteConfig = function(encodedName)
         delfile(filePath)
     end)
     if not deleteOk then
-        return false, "Ошибка удаления конфига: " .. tostring(deleteErr)
+        return false, "Could not delete config: " .. tostring(deleteErr)
     end
     
     configList[encodedName] = nil
-    return true, "Конфиг '" .. configName .. "' удален"
+    return true, "Config '" .. configName .. "' deleted"
 end
 
 getConfigsList = function()
@@ -7815,44 +9176,398 @@ getConfigsList = function()
     return configs
 end
 
-pConfig:addButton("Save Config", function()
-    local name = getgenv().aim_settings.config_name or ""
-    name = name:gsub("^%s*(.-)%s*$", "%1") -- Убираем пробелы
-    
-    local success, message = saveConfig(name)
-    EXT.notify(message, success and "ok" or "error")
-    
-    if success then
-        getgenv().aim_settings.config_name = "" -- Очищаем поле
-        selectedConfig = ""
-        refreshUIFromSettings()
-        updateConfigList() -- Обновляем список после сохранения
-    end
-end)
+function EXT.closeConfigConfirmationDialog()
+    local dialog = EXT.configConfirmationDialog
+    EXT.configConfirmationDialog = nil
+    if dialog then dialog:Destroy() end
+end
 
-pConfig:addButton("Load Selected", function()
-    if selectedConfig ~= "" then
-        local success, message = loadConfig(selectedConfig)
-        EXT.notify(message, success and "ok" or "error")
-    else
-        EXT.notify("Выберите конфиг для загрузки", "error")
-    end
-end)
+function EXT.showConfigConfirmation(options)
+    if EXT.configConfirmationDialog or EXT.configTransferDialog then return end
+    local overlay = Instance.new("TextButton")
+    overlay.Name = "ConfigConfirmation"
+    overlay.Size = UDim2.fromScale(1, 1)
+    overlay.BackgroundColor3 = Color3.new(0, 0, 0)
+    overlay.BackgroundTransparency = 0.35
+    overlay.BorderSizePixel = 0
+    overlay.Text = ""
+    overlay.AutoButtonColor = false
+    overlay.Active = true
+    overlay.Modal = true
+    overlay.ZIndex = 10000
+    EXT.configConfirmationDialog = overlay
 
-pConfig:addButton("Delete Selected", function()
-    if selectedConfig ~= "" then
-        local success, message = deleteConfig(selectedConfig)
-        EXT.notify(message, success and "ok" or "error")
-        if success then
-            selectedConfig = ""
-            getgenv().aim_settings.config_name = "" -- Очищаем поле
-            refreshUIFromSettings()
-            updateConfigList() -- Обновляем список после удаления
+    local card = Instance.new("Frame", overlay)
+    card.AnchorPoint = Vector2.new(0.5, 0.5)
+    card.Position = UDim2.fromScale(0.5, 0.5)
+    card.Size = UDim2.new(1, -32, 0, 190)
+    card.BackgroundColor3 = THEME.MODULE_BG
+    card.BorderSizePixel = 0
+    card.Active = true
+    card.ZIndex = 10001
+    local constraint = Instance.new("UISizeConstraint", card)
+    constraint.MaxSize = Vector2.new(360, 190)
+    Instance.new("UICorner", card).CornerRadius = UDim.new(0, 12)
+    local stroke = Instance.new("UIStroke", card)
+    stroke.Color = THEME.MODULE_STROKE
+
+    local title = Instance.new("TextLabel", card)
+    title.Position = UDim2.fromOffset(20, 18)
+    title.Size = UDim2.new(1, -40, 0, 26)
+    title.BackgroundTransparency = 1
+    title.Font = Enum.Font.GothamBold
+    title.TextSize = 17
+    title.TextColor3 = THEME.TEXT_TITLE
+    title.TextXAlignment = Enum.TextXAlignment.Left
+    title.Text = options.title
+    title.ZIndex = 10002
+
+    local message = Instance.new("TextLabel", card)
+    message.Position = UDim2.fromOffset(20, 52)
+    message.Size = UDim2.new(1, -40, 0, 64)
+    message.BackgroundTransparency = 1
+    message.Font = Enum.Font.Gotham
+    message.TextSize = 13
+    message.TextColor3 = THEME.TEXT_DIM
+    message.TextXAlignment = Enum.TextXAlignment.Left
+    message.TextYAlignment = Enum.TextYAlignment.Top
+    message.TextWrapped = true
+    message.TextTruncate = Enum.TextTruncate.AtEnd
+    message.Text = options.message
+    message.ZIndex = 10002
+
+    local cancel = Instance.new("TextButton", card)
+    cancel.Position = UDim2.new(0, 20, 1, -56)
+    cancel.Size = UDim2.new(0.5, -26, 0, 36)
+    cancel.BackgroundColor3 = THEME.BIND_BG
+    cancel.BorderSizePixel = 0
+    cancel.Font = Enum.Font.GothamMedium
+    cancel.TextSize = 13
+    cancel.TextColor3 = THEME.TEXT_TITLE
+    cancel.Text = "Cancel"
+    cancel.ZIndex = 10002
+    Instance.new("UICorner", cancel).CornerRadius = UDim.new(0, 7)
+
+    local confirm = Instance.new("TextButton", card)
+    confirm.Position = UDim2.new(0.5, 6, 1, -56)
+    confirm.Size = UDim2.new(0.5, -26, 0, 36)
+    confirm.BackgroundColor3 = options.color
+    confirm.BorderSizePixel = 0
+    confirm.Font = Enum.Font.GothamMedium
+    confirm.TextSize = 13
+    confirm.TextColor3 = Color3.new(1, 1, 1)
+    confirm.Text = options.confirmText
+    confirm.ZIndex = 10002
+    Instance.new("UICorner", confirm).CornerRadius = UDim.new(0, 7)
+
+    cancel.Activated:Connect(function()
+        EXT.closeConfigConfirmationDialog()
+    end)
+    confirm.Activated:Connect(function()
+        -- Имя зафиксировано при открытии окна; повторный клик ничего не удалит.
+        if EXT.configConfirmationDialog ~= overlay then return end
+        EXT.closeConfigConfirmationDialog()
+        local ok, errorMessage = pcall(options.onConfirm)
+        if not ok then EXT.notify("Could not complete the action: " .. tostring(errorMessage), "error") end
+    end)
+    overlay.Parent = ScreenGui
+end
+
+
+function EXT.confirmConfigDelete(encodedName)
+    local loaded, errorMessage = reloadConfigsFromDisk()
+    if not loaded then EXT.notify(errorMessage, "error") return end
+    local config = configList[encodedName]
+    if not config then EXT.notify("Config not found", "error") return end
+    EXT.showConfigConfirmation({
+        title = "Delete config?",
+        message = "Config '" .. tostring(config.name) .. "' will be deleted. This cannot be undone.",
+        confirmText = "Delete",
+        color = Color3.fromRGB(185, 52, 65),
+        onConfirm = function()
+            local success, result = deleteConfig(encodedName)
+            EXT.notify(result, success and "ok" or "error")
+            if success then
+                if selectedConfig == encodedName then
+                    selectedConfig = ""
+                    getgenv().aim_settings.config_name = ""
+                end
+                refreshUIFromSettings()
+                updateConfigList()
+            end
         end
-    else
-        EXT.notify("Выберите конфиг для удаления", "error")
+    })
+end
+
+function EXT.confirmConfigSave()
+    local name = tostring(getgenv().aim_settings.config_name or ""):match("^%s*(.-)%s*$")
+    if name == "" then EXT.notify("Enter a config name first", "error") return end
+    local loaded, errorMessage = reloadConfigsFromDisk()
+    if not loaded then EXT.notify(errorMessage, "error") return end
+    local replacing = configList[encodeConfigName(name)] ~= nil
+    EXT.showConfigConfirmation({
+        title = replacing and "Overwrite config?" or "Save config?",
+        message = replacing
+            and ("Replace config '" .. name .. "' with your current settings?")
+            or ("Save your current settings as '" .. name .. "'?"),
+        confirmText = replacing and "Overwrite" or "Save",
+        color = getClientColor(),
+        onConfirm = function()
+            -- Имя фиксируется при открытии подтверждения.
+            local success, message = saveConfig(name)
+            EXT.notify(message, success and "ok" or "error")
+            if success then
+                getgenv().aim_settings.config_name = ""
+                selectedConfig = ""
+                refreshUIFromSettings()
+                updateConfigList()
+            end
+        end
+    })
+end
+
+State.connections.configDeleteVisibility = ScreenGui:GetPropertyChangedSignal("Enabled"):Connect(function()
+    if not ScreenGui.Enabled then
+        EXT.closeConfigConfirmationDialog()
+        if EXT.closeConfigTransferDialog then EXT.closeConfigTransferDialog() end
     end
 end)
+
+function EXT.closeConfigTransferDialog()
+    local dialog = EXT.configTransferDialog
+    EXT.configTransferDialog = nil
+    if dialog then dialog:Destroy() end
+end
+
+function EXT.showConfigTransferDialog(mode, initialText, importCallback)
+    if EXT.configConfirmationDialog then return end
+    EXT.closeConfigTransferDialog()
+    local importing = mode == "import"
+    local overlay = Instance.new("TextButton")
+    overlay.Name = "ConfigTransferDialog"
+    overlay.Size = UDim2.fromScale(1, 1)
+    overlay.BackgroundColor3 = Color3.new(0, 0, 0)
+    overlay.BackgroundTransparency = 0.35
+    overlay.BorderSizePixel = 0
+    overlay.Text = ""
+    overlay.AutoButtonColor = false
+    overlay.Active = true
+    overlay.Modal = true
+    overlay.ZIndex = 10000
+    EXT.configTransferDialog = overlay
+
+    local card = Instance.new("Frame", overlay)
+    card.AnchorPoint = Vector2.new(0.5, 0.5)
+    card.Position = UDim2.fromScale(0.5, 0.5)
+    card.Size = UDim2.new(1, -32, 0.8, 0)
+    card.BackgroundColor3 = THEME.MODULE_BG
+    card.BorderSizePixel = 0
+    card.Active = true
+    card.ZIndex = 10001
+    local constraint = Instance.new("UISizeConstraint", card)
+    constraint.MaxSize = Vector2.new(540, 340)
+    Instance.new("UICorner", card).CornerRadius = UDim.new(0, 12)
+    Instance.new("UIStroke", card).Color = THEME.MODULE_STROKE
+
+    local title = Instance.new("TextLabel", card)
+    title.Position = UDim2.fromOffset(20, 16)
+    title.Size = UDim2.new(1, -40, 0, 26)
+    title.BackgroundTransparency = 1
+    title.Font = Enum.Font.GothamBold
+    title.TextSize = 17
+    title.TextColor3 = THEME.TEXT_TITLE
+    title.TextXAlignment = Enum.TextXAlignment.Left
+    title.Text = importing and "Import config" or "Export config"
+    title.ZIndex = 10002
+
+    local hint = Instance.new("TextLabel", card)
+    hint.Position = UDim2.fromOffset(20, 46)
+    hint.Size = UDim2.new(1, -40, 0, 38)
+    hint.BackgroundTransparency = 1
+    hint.Font = Enum.Font.Gotham
+    hint.TextSize = 12
+    hint.TextColor3 = THEME.TEXT_DIM
+    hint.TextXAlignment = Enum.TextXAlignment.Left
+    hint.TextWrapped = true
+    hint.Text = importing and "Paste your config JSON into the field using Ctrl+V."
+        or "Click the field, then press Ctrl+A and Ctrl+C to copy the JSON."
+    hint.ZIndex = 10002
+
+    local scroll = Instance.new("ScrollingFrame", card)
+    scroll.Position = UDim2.fromOffset(20, 90)
+    scroll.Size = UDim2.new(1, -40, 1, -160)
+    scroll.BackgroundColor3 = THEME.BIND_BG
+    scroll.BorderSizePixel = 0
+    scroll.ScrollBarThickness = 4
+    scroll.CanvasSize = UDim2.fromScale(0, 0)
+    scroll.AutomaticCanvasSize = Enum.AutomaticSize.Y
+    scroll.ZIndex = 10002
+    Instance.new("UICorner", scroll).CornerRadius = UDim.new(0, 7)
+
+    local input = Instance.new("TextBox", scroll)
+    input.Position = UDim2.fromOffset(8, 8)
+    input.Size = UDim2.new(1, -24, 0, 140)
+    input.AutomaticSize = Enum.AutomaticSize.Y
+    input.BackgroundTransparency = 1
+    input.ClearTextOnFocus = false
+    input.MultiLine = true
+    input.TextWrapped = true
+    input.TextXAlignment = Enum.TextXAlignment.Left
+    input.TextYAlignment = Enum.TextYAlignment.Top
+    input.Font = Enum.Font.Code
+    input.TextSize = 12
+    input.TextColor3 = THEME.TEXT_TITLE
+    input.PlaceholderText = "Paste JSON here..."
+    input.Text = initialText or ""
+    input.TextEditable = importing
+    input.ZIndex = 10003
+
+    local cancel = Instance.new("TextButton", card)
+    cancel.Position = UDim2.new(0, 20, 1, -54)
+    cancel.Size = importing and UDim2.new(0.5, -26, 0, 34) or UDim2.new(1, -40, 0, 34)
+    cancel.BackgroundColor3 = THEME.BIND_BG
+    cancel.BorderSizePixel = 0
+    cancel.Font = Enum.Font.GothamMedium
+    cancel.TextSize = 13
+    cancel.TextColor3 = THEME.TEXT_TITLE
+    cancel.Text = importing and "Cancel" or "Close"
+    cancel.ZIndex = 10002
+    Instance.new("UICorner", cancel).CornerRadius = UDim.new(0, 7)
+    cancel.Activated:Connect(function() EXT.closeConfigTransferDialog() end)
+
+    if importing then
+        local submit = Instance.new("TextButton", card)
+        submit.Position = UDim2.new(0.5, 6, 1, -54)
+        submit.Size = UDim2.new(0.5, -26, 0, 34)
+        submit.BackgroundColor3 = getClientColor()
+        submit.BorderSizePixel = 0
+        submit.Font = Enum.Font.GothamMedium
+        submit.TextSize = 13
+        submit.TextColor3 = Color3.new(1, 1, 1)
+        submit.Text = "Import"
+        submit.ZIndex = 10002
+        Instance.new("UICorner", submit).CornerRadius = UDim.new(0, 7)
+        local busy = false
+        submit.Activated:Connect(function()
+            if busy or EXT.configTransferDialog ~= overlay then return end
+            busy = true
+            local called, success, message = pcall(importCallback, input.Text)
+            if not called then
+                success, message = false, "Could not import the config. Check the JSON."
+            end
+            if success then EXT.closeConfigTransferDialog() end
+            EXT.notify(message, success and "ok" or "error")
+            busy = false
+        end)
+    end
+    overlay.Parent = ScreenGui
+    task.defer(function()
+        if EXT.configTransferDialog ~= overlay then return end
+        input:CaptureFocus()
+        if not importing then
+            input.CursorPosition = #input.Text + 1
+            input.SelectionStart = 1
+        end
+    end)
+end
+
+local function exportConfigToClipboard()
+    local name = getgenv().aim_settings.config_name or ""
+    if name == "" then
+        name = "Moonware_Config"
+    end
+    EXT.captureAllPositions()
+    local _, serializedData = snapshotConfigData()
+    local payload = {
+        name = name,
+        client = "Moonware",
+        timestamp = os.time(),
+        data = serializedData
+    }
+    local ok, json = pcall(function()
+        return G.Http:JSONEncode(payload)
+    end)
+    if not ok or not json then
+        return false, "Could not encode the config as JSON"
+    end
+    if type(setclipboard) == "function" then
+        local clipOk = pcall(setclipboard, json)
+        if clipOk then
+            return true, "Config copied to clipboard!"
+        end
+    end
+    EXT.showConfigTransferDialog("export", json)
+    return true, "JSON is ready to copy"
+end
+
+function EXT.importConfigJson(rawJson)
+    if type(rawJson) ~= "string" or rawJson:gsub("%s", "") == "" then
+        return false, "Paste your config JSON into the field"
+    end
+    local decodeOk, parsed = pcall(function()
+        return G.Http:JSONDecode(rawJson)
+    end)
+    if not decodeOk or type(parsed) ~= "table" or type(parsed.data) ~= "table" then
+        return false, "Invalid config JSON"
+    end
+    
+    local cfgName = (type(parsed.name) == "string" and parsed.name ~= "") and parsed.name or "Imported"
+    local encodedName = encodeConfigName(cfgName)
+    if not ensureConfigFolder() then
+        return false, "Could not open the config folder"
+    end
+    parsed.name = cfgName
+    parsed.timestamp = type(parsed.timestamp) == "number" and parsed.timestamp or os.time()
+    local writeOk = pcall(function()
+        writefile(getConfigFilePath(encodedName), G.Http:JSONEncode(parsed))
+    end)
+    if not writeOk then
+        return false, "Could not save the imported config"
+    end
+    
+    local success, message = loadConfig(encodedName)
+    if success then
+        selectedConfig = encodedName
+        getgenv().aim_settings.config_name = cfgName
+        if updateConfigList then updateConfigList() end
+        return true, "Config '" .. cfgName .. "' imported!"
+    else
+        return false, message
+    end
+end
+
+local function importConfigFromClipboard()
+    if type(getclipboard) == "function" then
+        local clipOk, rawJson = pcall(getclipboard)
+        if clipOk and type(rawJson) == "string" and rawJson:gsub("%s", "") ~= "" then
+            local called, success, message = pcall(EXT.importConfigJson, rawJson)
+            if called and success then return true, message end
+            EXT.showConfigTransferDialog("import", rawJson, EXT.importConfigJson)
+            return true, "Check the JSON and click Import"
+        end
+    end
+    EXT.showConfigTransferDialog("import", "", EXT.importConfigJson)
+    return true, "Paste your config using Ctrl+V"
+end
+
+local function resetToDefaultSettings()
+    for k, v in pairs(DEFAULT_SETTINGS) do
+        if k ~= "running" then
+            if type(v) == "table" and typeof(v) ~= "Color3" and typeof(v) ~= "EnumItem" then
+                getgenv().aim_settings[k] = {}
+                for subK, subV in pairs(v) do
+                    getgenv().aim_settings[k][subK] = subV
+                end
+            else
+                getgenv().aim_settings[k] = v
+            end
+        end
+    end
+    getgenv().aim_settings.config_name = ""
+    refreshUIFromSettings()
+    updateAllColors()
+    EXT.notify("Default settings restored", "ok")
+end
 
 -- Список конфигов в ScrollingFrame
 local configScrollFrame = Instance.new("ScrollingFrame")
@@ -7950,12 +9665,85 @@ updateConfigList = function()
 end
 
 -- Кнопка для обновления списка
-pConfig:addButton("Refresh List", function()
+function EXT.addConfigSection(title, order)
+    local frame = Instance.new("Frame")
+    frame.Name = "ConfigSection_" .. title
+    frame.Size = UDim2.new(1, -16, 0, 26)
+    frame.BackgroundTransparency = 1
+    local label = Instance.new("TextLabel", frame)
+    label.Position = UDim2.fromOffset(2, 6)
+    label.Size = UDim2.new(1, -4, 0, 18)
+    label.BackgroundTransparency = 1
+    label.Text = string.upper(title)
+    label.TextColor3 = THEME.TEXT_DIM
+    label.Font = Enum.Font.GothamBold
+    label.TextSize = 10
+    label.TextXAlignment = Enum.TextXAlignment.Left
+    pConfig:addCustomElement(frame)
+    frame.LayoutOrder = order
+end
+
+function EXT.addConfigButton(order, name, callback)
+    local frame = pConfig:addButton(name, callback)
+    frame.LayoutOrder = order
+    if name == "Delete Selected" then
+        local button = frame:FindFirstChildOfClass("TextButton")
+        button.TextColor3 = Color3.fromRGB(240, 125, 135)
+    end
+    return frame
+end
+
+
+EXT.addConfigSection("Configurations", 10)
+EXT.addConfigButton(20, "Load Selected", function()
+    if selectedConfig ~= "" then
+        local success, message = loadConfig(selectedConfig)
+        EXT.notify(message, success and "ok" or "error")
+    else
+        EXT.notify("Select a config to load", "error")
+    end
+end)
+
+
+pConfig:addTextBox("Config Name", "config_name", "Enter name...").LayoutOrder = 30
+EXT.addConfigButton(40, "Save Config", function() EXT.confirmConfigSave() end)
+
+EXT.addConfigSection("Saved Configs", 50)
+configScrollFrame.LayoutOrder = 60
+EXT.addConfigButton(70, "Refresh List", function()
     updateConfigList()
 end)
 
-pConfig:addButton("Reset HUD Layout", function()
+
+EXT.addConfigSection("Import / Export", 80)
+EXT.addConfigButton(90, "Export to Clipboard", function()
+    local ok, msg = exportConfigToClipboard()
+    EXT.notify(msg, ok and "ok" or "error")
+end)
+
+EXT.addConfigButton(100, "Import from Clipboard", function()
+    local ok, msg = importConfigFromClipboard()
+    EXT.notify(msg, ok and "ok" or "error")
+end)
+
+
+EXT.addConfigSection("Reset", 110)
+EXT.addConfigButton(120, "Reset HUD Layout", function()
     EXT.resetHudLayout()
+end)
+
+EXT.addConfigButton(130, "Reset Defaults", function()
+    resetToDefaultSettings()
+end)
+
+
+EXT.addConfigSection("Delete", 140)
+EXT.addConfigButton(150, "Delete Selected", function()
+    if selectedConfig == "" then
+        EXT.notify("Select a config to delete", "error")
+        return
+    end
+    EXT.confirmConfigDelete(selectedConfig)
 end)
 
 table.insert(State.panels, pConfig)
@@ -8024,6 +9812,7 @@ local lastKeybindUpdate = 0
 local lastArrowsUpdate = 0
 local lastAntiFlingUpdate = 0
 local lastMarkersUpdate = 0
+local lastPerfGraphUpdate = 0
 
 -- Вспомогательные функции для уменьшения локальных переменных в RenderStepped
 local function updateGUIVisibility()
@@ -8141,6 +9930,164 @@ State.connections.freecam = G.RS.RenderStepped:Connect(function(dt)
     G.Cam.CFrame = fc.cframe
 end)
 
+function EXT.clearAuraChams(character)
+    if not character then return end
+    -- Быстрый выход: без него GetDescendants() гонялся бы по каждому
+    -- персонажу каждый кадр, даже когда чистить нечего.
+    if not (character:FindFirstChild("Y_ESP_Glow")
+        or character:FindFirstChild("Y_ESP_Glow_Outline")
+        or character:FindFirstChild("Y_ESP_Aura")) then
+        return
+    end
+    for _, obj in pairs(character:GetDescendants()) do
+        if obj.Name == "Y_ESP_Aura"
+            or obj.Name == "Y_ESP_Aura_Attachment"
+            or obj.Name == "Y_ESP_Glow_Weld" then
+            obj:Destroy()
+        end
+    end
+    local glowFolder = character:FindFirstChild("Y_ESP_Glow")
+    if glowFolder then
+        glowFolder:Destroy()
+    end
+    local glowOutline = character:FindFirstChild("Y_ESP_Glow_Outline")
+    if glowOutline then
+        glowOutline:Destroy()
+    end
+end
+
+function EXT.addAuraChams(character, color)
+    if not character then return end
+    local glowFolder = character:FindFirstChild("Y_ESP_Glow") or Instance.new("Folder")
+    glowFolder.Name = "Y_ESP_Glow"
+    glowFolder.Parent = character
+    local validParts = {}
+
+    local function shouldUsePart(part)
+        local name = part.Name
+        if not part:IsA("BasePart") or name == "HumanoidRootPart" then
+            return false
+        end
+
+        return name == "Head"
+            or name == "Torso"
+            or name == "UpperTorso"
+            or name == "LowerTorso"
+            or name == "Left Arm"
+            or name == "Right Arm"
+            or name == "Left Leg"
+            or name == "Right Leg"
+            or string.find(name, "UpperArm")
+            or string.find(name, "LowerArm")
+            or string.find(name, "UpperLeg")
+            or string.find(name, "LowerLeg")
+            or string.find(name, "Hand")
+            or string.find(name, "Foot")
+    end
+
+    local function getShellScale(part)
+        local name = part.Name
+        if name == "Head" then
+            return 0.075, 0.13
+        end
+        if name == "Torso" or name == "UpperTorso" or name == "LowerTorso" then
+            return 0.08, 0.145
+        end
+        return 0.055, 0.105
+    end
+
+    local function stripShell(shell)
+        for _, desc in pairs(shell:GetDescendants()) do
+            if not desc:IsA("SpecialMesh") then
+                desc:Destroy()
+            end
+        end
+
+        pcall(function()
+            shell.TextureID = ""
+        end)
+    end
+
+    local function setupShell(shell, sourcePart, sizeOffset, material, transparency)
+        shell.CFrame = sourcePart.CFrame
+        shell.Size = Vector3.new(
+            sourcePart.Size.X + sizeOffset,
+            sourcePart.Size.Y + sizeOffset,
+            sourcePart.Size.Z + sizeOffset
+        )
+        shell.Color = color
+        shell.Material = material
+        shell.Transparency = transparency
+        shell.CastShadow = false
+        shell.CanCollide = false
+        shell.CanTouch = false
+        shell.CanQuery = false
+        shell.Massless = true
+        shell.Anchored = false
+    end
+
+    for _, part in pairs(character:GetChildren()) do
+        if shouldUsePart(part) then
+            validParts[part.Name] = true
+
+            local partFolder = glowFolder:FindFirstChild(part.Name)
+            if not partFolder then
+                partFolder = Instance.new("Folder")
+                partFolder.Name = part.Name
+                partFolder.Parent = glowFolder
+            end
+
+            local shellCore = partFolder:FindFirstChild("ShellCore")
+            if not shellCore then
+                shellCore = part:Clone()
+                shellCore.Name = "ShellCore"
+                stripShell(shellCore)
+                shellCore.Parent = partFolder
+
+                local weld = Instance.new("WeldConstraint")
+                weld.Name = "Y_ESP_Glow_Weld"
+                weld.Part0 = shellCore
+                weld.Part1 = part
+                weld.Parent = shellCore
+            end
+
+            local shellRim = partFolder:FindFirstChild("ShellRim")
+            if not shellRim then
+                shellRim = part:Clone()
+                shellRim.Name = "ShellRim"
+                stripShell(shellRim)
+                shellRim.Parent = partFolder
+
+                local weld = Instance.new("WeldConstraint")
+                weld.Name = "Y_ESP_Glow_Weld"
+                weld.Part0 = shellRim
+                weld.Part1 = part
+                weld.Parent = shellRim
+            end
+
+            local coreOffset, rimOffset = getShellScale(part)
+            setupShell(shellCore, part, coreOffset, Enum.Material.Neon, 0.84)
+            setupShell(shellRim, part, rimOffset, Enum.Material.ForceField, 0.58)
+        end
+    end
+
+    for _, folder in pairs(glowFolder:GetChildren()) do
+        if not validParts[folder.Name] then
+            folder:Destroy()
+        end
+    end
+
+    local glowOutline = character:FindFirstChild("Y_ESP_Glow_Outline") or Instance.new("Highlight")
+    glowOutline.Name = "Y_ESP_Glow_Outline"
+    glowOutline.Parent = character
+    glowOutline.Adornee = character
+    glowOutline.DepthMode = Enum.HighlightDepthMode.AlwaysOnTop
+    glowOutline.FillColor = color
+    glowOutline.FillTransparency = 1
+    glowOutline.OutlineColor = color
+    glowOutline.OutlineTransparency = 0.65
+end
+
 State.connections.mainLoop = G.RS.RenderStepped:Connect(function()
     if not getgenv().aim_settings.running then return end
     
@@ -8151,6 +10098,7 @@ State.connections.mainLoop = G.RS.RenderStepped:Connect(function()
     State.watermark.frameCount = (State.watermark.frameCount or 0) + 1
     
     updatePanelAnimation(dt)
+    EXT.updateModuleScales()
     
     if t - lastColorCheck >= OPTIMIZATION.COLOR_CHECK_INTERVAL then
         if getClientColor() ~= lastClientColor then updateAllColors() end
@@ -8178,7 +10126,7 @@ State.connections.mainLoop = G.RS.RenderStepped:Connect(function()
     EXT.updateMouseGlow(dt)
     
     local s = getgenv().aim_settings
-    local currentPlayers = G.Plr:GetPlayers()
+    local currentPlayers = EXT.getPlayers()
     if s.infinite_jump_enabled and not IJ.c then
         IJ_I()
     elseif not s.infinite_jump_enabled and IJ.c then
@@ -8238,10 +10186,15 @@ State.connections.mainLoop = G.RS.RenderStepped:Connect(function()
                 gc1 = tintColor(cc, 0.82, 0)
                 gc2 = tintColor(cc, 1, 0)
             end
-            local eg = ColorSequence.new({
-                ColorSequenceKeypoint.new(0, gc1),
-                ColorSequenceKeypoint.new(1, gc2)
-            })
+            if State.targetEsp.gradientColor1 ~= gc1 or State.targetEsp.gradientColor2 ~= gc2 then
+                State.targetEsp.gradientColor1 = gc1
+                State.targetEsp.gradientColor2 = gc2
+                State.targetEsp.gradient = ColorSequence.new({
+                    ColorSequenceKeypoint.new(0, gc1),
+                    ColorSequenceKeypoint.new(1, gc2)
+                })
+            end
+            local eg = State.targetEsp.gradient
 
             if s.target_esp_mode == "Circle" then
                 -- Накапливаем угол через dt: скорость не зависит от FPS
@@ -8408,164 +10361,6 @@ State.connections.mainLoop = G.RS.RenderStepped:Connect(function()
         end
     end
     
-    local function clearAuraChams(character)
-        if not character then return end
-        -- Быстрый выход: без него GetDescendants() гонялся бы по каждому
-        -- персонажу каждый кадр, даже когда чистить нечего.
-        if not (character:FindFirstChild("Y_ESP_Glow")
-            or character:FindFirstChild("Y_ESP_Glow_Outline")
-            or character:FindFirstChild("Y_ESP_Aura")) then
-            return
-        end
-        for _, obj in pairs(character:GetDescendants()) do
-            if obj.Name == "Y_ESP_Aura"
-                or obj.Name == "Y_ESP_Aura_Attachment"
-                or obj.Name == "Y_ESP_Glow_Weld" then
-                obj:Destroy()
-            end
-        end
-        local glowFolder = character:FindFirstChild("Y_ESP_Glow")
-        if glowFolder then
-            glowFolder:Destroy()
-        end
-        local glowOutline = character:FindFirstChild("Y_ESP_Glow_Outline")
-        if glowOutline then
-            glowOutline:Destroy()
-        end
-    end
-
-    local function addAuraChams(character, color)
-        if not character then return end
-        local glowFolder = character:FindFirstChild("Y_ESP_Glow") or Instance.new("Folder")
-        glowFolder.Name = "Y_ESP_Glow"
-        glowFolder.Parent = character
-        local validParts = {}
-
-        local function shouldUsePart(part)
-            local name = part.Name
-            if not part:IsA("BasePart") or name == "HumanoidRootPart" then
-                return false
-            end
-
-            return name == "Head"
-                or name == "Torso"
-                or name == "UpperTorso"
-                or name == "LowerTorso"
-                or name == "Left Arm"
-                or name == "Right Arm"
-                or name == "Left Leg"
-                or name == "Right Leg"
-                or string.find(name, "UpperArm")
-                or string.find(name, "LowerArm")
-                or string.find(name, "UpperLeg")
-                or string.find(name, "LowerLeg")
-                or string.find(name, "Hand")
-                or string.find(name, "Foot")
-        end
-
-        local function getShellScale(part)
-            local name = part.Name
-            if name == "Head" then
-                return 0.075, 0.13
-            end
-            if name == "Torso" or name == "UpperTorso" or name == "LowerTorso" then
-                return 0.08, 0.145
-            end
-            return 0.055, 0.105
-        end
-
-        local function stripShell(shell)
-            for _, desc in pairs(shell:GetDescendants()) do
-                if not desc:IsA("SpecialMesh") then
-                    desc:Destroy()
-                end
-            end
-
-            pcall(function()
-                shell.TextureID = ""
-            end)
-        end
-
-        local function setupShell(shell, sourcePart, sizeOffset, material, transparency)
-            shell.CFrame = sourcePart.CFrame
-            shell.Size = Vector3.new(
-                sourcePart.Size.X + sizeOffset,
-                sourcePart.Size.Y + sizeOffset,
-                sourcePart.Size.Z + sizeOffset
-            )
-            shell.Color = color
-            shell.Material = material
-            shell.Transparency = transparency
-            shell.CastShadow = false
-            shell.CanCollide = false
-            shell.CanTouch = false
-            shell.CanQuery = false
-            shell.Massless = true
-            shell.Anchored = false
-        end
-
-        for _, part in pairs(character:GetChildren()) do
-            if shouldUsePart(part) then
-                validParts[part.Name] = true
-
-                local partFolder = glowFolder:FindFirstChild(part.Name)
-                if not partFolder then
-                    partFolder = Instance.new("Folder")
-                    partFolder.Name = part.Name
-                    partFolder.Parent = glowFolder
-                end
-
-                local shellCore = partFolder:FindFirstChild("ShellCore")
-                if not shellCore then
-                    shellCore = part:Clone()
-                    shellCore.Name = "ShellCore"
-                    stripShell(shellCore)
-                    shellCore.Parent = partFolder
-
-                    local weld = Instance.new("WeldConstraint")
-                    weld.Name = "Y_ESP_Glow_Weld"
-                    weld.Part0 = shellCore
-                    weld.Part1 = part
-                    weld.Parent = shellCore
-                end
-
-                local shellRim = partFolder:FindFirstChild("ShellRim")
-                if not shellRim then
-                    shellRim = part:Clone()
-                    shellRim.Name = "ShellRim"
-                    stripShell(shellRim)
-                    shellRim.Parent = partFolder
-
-                    local weld = Instance.new("WeldConstraint")
-                    weld.Name = "Y_ESP_Glow_Weld"
-                    weld.Part0 = shellRim
-                    weld.Part1 = part
-                    weld.Parent = shellRim
-                end
-
-                local coreOffset, rimOffset = getShellScale(part)
-                setupShell(shellCore, part, coreOffset, Enum.Material.Neon, 0.84)
-                setupShell(shellRim, part, rimOffset, Enum.Material.ForceField, 0.58)
-            end
-        end
-
-        for _, folder in pairs(glowFolder:GetChildren()) do
-            if not validParts[folder.Name] then
-                folder:Destroy()
-            end
-        end
-
-        local glowOutline = character:FindFirstChild("Y_ESP_Glow_Outline") or Instance.new("Highlight")
-        glowOutline.Name = "Y_ESP_Glow_Outline"
-        glowOutline.Parent = character
-        glowOutline.Adornee = character
-        glowOutline.DepthMode = Enum.HighlightDepthMode.AlwaysOnTop
-        glowOutline.FillColor = color
-        glowOutline.FillTransparency = 1
-        glowOutline.OutlineColor = color
-        glowOutline.OutlineTransparency = 0.65
-    end
-
     -- ESP Logic
     local persistentPlayerEspEnabled = shouldTrackPersistentPlayerEsp()
     if persistentPlayerEspEnabled then
@@ -8607,7 +10402,7 @@ State.connections.mainLoop = G.RS.RenderStepped:Connect(function()
             local hl = entry.highlight
             if hl then
                 hl.Enabled = getgenv().aim_settings.esp_enabled and getgenv().aim_settings.esp_chams and not hideChams
-                if getgenv().aim_settings.esp_team_color and p.Team then
+                if getgenv().aim_settings.esp_team_color and p.Team and p.Team.TeamColor then
                     hl.FillColor = p.Team.TeamColor.Color
                 else
                     hl.FillColor = getgenv().aim_settings.esp_chams_color
@@ -8622,12 +10417,12 @@ State.connections.mainLoop = G.RS.RenderStepped:Connect(function()
                 end
 
                 if getgenv().aim_settings.esp_enabled and getgenv().aim_settings.esp_glow_chams and not hideChams then
-                    addAuraChams(character, hl.FillColor)
+                    EXT.addAuraChams(character, hl.FillColor)
                 else
-                    clearAuraChams(character)
+                    EXT.clearAuraChams(character)
                 end
             else
-                clearAuraChams(character)
+                EXT.clearAuraChams(character)
             end
 
             local head = entry.head
@@ -8669,7 +10464,7 @@ State.connections.mainLoop = G.RS.RenderStepped:Connect(function()
 
                     textLabel.Text = table.concat(textParts, "\n")
 
-                    if getgenv().aim_settings.esp_team_color and p.Team then
+                    if getgenv().aim_settings.esp_team_color and p.Team and p.Team.TeamColor then
                         textLabel.TextColor3 = p.Team.TeamColor.Color
                     else
                         textLabel.TextColor3 = Color3.fromRGB(255, 255, 255)
@@ -8682,7 +10477,7 @@ State.connections.mainLoop = G.RS.RenderStepped:Connect(function()
                 friendMarker.Enabled = getgenv().aim_settings.friend_markers and isFriendPlayer
             end
         elseif character then
-            clearAuraChams(character)
+            EXT.clearAuraChams(character)
         end
     end
 
@@ -8965,6 +10760,17 @@ State.connections.mainLoop = G.RS.RenderStepped:Connect(function()
             -- Метрики подсвечиваются: зелёный хорошо, жёлтый средне, красный плохо
             FPSLabel.TextColor3 = EXT.metricColor(-State.watermark.displayFPS, -100, -30)
             PingLabel.TextColor3 = EXT.metricColor(State.watermark.displayPing, 80, 200)
+
+            local memEnabled = getgenv().aim_settings.watermark_memory_enabled
+            if Separator4 then Separator4.Visible = memEnabled end
+            if MemoryLabel then
+                MemoryLabel.Visible = memEnabled
+                if memEnabled then
+                    local memMB = math.round(game:GetService("Stats"):GetTotalMemoryUsageMb())
+                    MemoryLabel.Text = memMB .. "mb"
+                    MemoryLabel.TextColor3 = EXT.metricColor(memMB, 500, 1000)
+                end
+            end
         end
         
         NickLabel.Text = G.LP.Name .. " · " .. EXT.formatSession()
@@ -8982,8 +10788,41 @@ State.connections.mainLoop = G.RS.RenderStepped:Connect(function()
         })
         
         -- Автоматический размер фрейма
-        local totalWidth = ClientLabel.AbsoluteSize.X + NickLabel.AbsoluteSize.X + FPSLabel.AbsoluteSize.X + PingLabel.AbsoluteSize.X + 60
+        local memExtra = (Separator4 and Separator4.Visible and MemoryLabel) and (Separator4.AbsoluteSize.X + MemoryLabel.AbsoluteSize.X) or 0
+        local totalWidth = ClientLabel.AbsoluteSize.X + NickLabel.AbsoluteSize.X + FPSLabel.AbsoluteSize.X + PingLabel.AbsoluteSize.X + memExtra + 60
         WatermarkFrame.Size = UDim2.new(0, math.max(180, totalWidth), 0, 30)
+    end
+    
+    -- Performance Graph Display
+    if PerfGraphFrame then
+        local graphShow = getgenv().aim_settings.hud_enabled and getgenv().aim_settings.perf_graph_enabled
+        PerfGraphFrame.Visible = graphShow
+        if graphShow and (t - lastPerfGraphUpdate >= 0.1) then
+            lastPerfGraphUpdate = t
+            local curFps = State.watermark.currentFPS or 60
+            local curPing = State.watermark.currentPing or 0
+            if perfInfo then
+                perfInfo.Text = string.format("%dfps · %dms", curFps, curPing)
+            end
+            
+            table.remove(State.perfGraph.history, 1)
+            table.insert(State.perfGraph.history, curFps)
+            
+            if State.perfBars then
+                for idx, bar in ipairs(State.perfBars) do
+                    local val = State.perfGraph.history[idx] or 60
+                    local heightRatio = math.clamp(val / 120, 0.08, 1)
+                    bar.Size = UDim2.new(0, 4, heightRatio, 0)
+                    if val < 30 then
+                        bar.BackgroundColor3 = Color3.fromRGB(235, 75, 75)
+                    elseif val < 50 then
+                        bar.BackgroundColor3 = Color3.fromRGB(240, 200, 60)
+                    else
+                        bar.BackgroundColor3 = getClientColor()
+                    end
+                end
+            end
+        end
     end
     
     -- Jump Circle Logic (только для локального игрока)
@@ -9111,7 +10950,6 @@ State.connections.mainLoop = G.RS.RenderStepped:Connect(function()
             local circle = State.jumpCircles[i]
             local currentTime = tick()
             local elapsed = currentTime - circle.startTime
-            local speed = getgenv().aim_settings.jump_circle_speed
             local maxSize = getgenv().aim_settings.jump_circle_size * 50 -- Конвертируем в пиксели
             
             -- Проверяем что игрок и части еще существуют
@@ -9124,17 +10962,18 @@ State.connections.mainLoop = G.RS.RenderStepped:Connect(function()
                     -- Обновляем цвет в реальном времени
                     imageLabel.ImageColor3 = getgenv().aim_settings.jump_circle_color
                     
+                    local speed = math.max(tonumber(getgenv().aim_settings.jump_circle_speed) or 0.5, 0.05)
                     local totalDuration = 2.0 / speed -- Общая длительность анимации
-                    local appearDuration = totalDuration * 0.3 -- 30% времени на появление
+                    local appearDuration = math.max(totalDuration * 0.3, 0.001) -- 30% времени на появление
                     local visibleDuration = totalDuration * 0.4 -- 40% времени видимый
-                    local disappearDuration = totalDuration * 0.3 -- 30% времени на исчезновение
+                    local disappearDuration = math.max(totalDuration * 0.3, 0.001) -- 30% времени на исчезновение
                     
                     -- Максимальный размер в стадах (настройка размера)
-                    local finalSize = getgenv().aim_settings.jump_circle_size
+                    local finalSize = math.max(tonumber(getgenv().aim_settings.jump_circle_size) or 2.0, 0.1)
                     
                     if elapsed < appearDuration then
                         -- Фаза появления: плавно увеличиваем размер и уменьшаем прозрачность
-                        local progress = elapsed / appearDuration
+                        local progress = math.clamp(elapsed / appearDuration, 0, 1)
                         local easeProgress = 1 - (1 - progress) * (1 - progress) -- Ease out
                         
                         local currentSize = finalSize * easeProgress
@@ -9148,7 +10987,7 @@ State.connections.mainLoop = G.RS.RenderStepped:Connect(function()
                         
                     elseif elapsed < totalDuration then
                         -- Фаза исчезновения: сохраняем размер, увеличиваем прозрачность
-                        local disappearProgress = (elapsed - appearDuration - visibleDuration) / disappearDuration
+                        local disappearProgress = math.clamp((elapsed - appearDuration - visibleDuration) / disappearDuration, 0, 1)
                         local easeProgress = disappearProgress * disappearProgress -- Ease in
                         
                         circle.circlePart.Size = Vector3.new(finalSize, finalSize, 0.01)
@@ -9299,6 +11138,7 @@ State.connections.mainLoop = G.RS.RenderStepped:Connect(function()
                     
                     -- Современный минималистичный стиль
                     trail.Color = ColorSequence.new(getgenv().aim_settings.trails_color)
+                    State.trails.lastColor = getgenv().aim_settings.trails_color
                     trail.Transparency = NumberSequence.new({
                         NumberSequenceKeypoint.new(0, 0.3), -- Начало более прозрачное
                         NumberSequenceKeypoint.new(0.5, 0.6),
@@ -9325,7 +11165,10 @@ State.connections.mainLoop = G.RS.RenderStepped:Connect(function()
                 if State.trails.trail then
                     State.trails.trail.Enabled = true
                     State.trails.trail.Lifetime = getgenv().aim_settings.trails_lifetime
-                    State.trails.trail.Color = ColorSequence.new(getgenv().aim_settings.trails_color)
+                    if State.trails.lastColor ~= getgenv().aim_settings.trails_color then
+                        State.trails.lastColor = getgenv().aim_settings.trails_color
+                        State.trails.trail.Color = ColorSequence.new(State.trails.lastColor)
+                    end
                 end
             end
         end
@@ -9350,7 +11193,7 @@ State.connections.mainLoop = G.RS.RenderStepped:Connect(function()
         if t - lastAntiFlingUpdate >= OPTIMIZATION.ANTIFLING_UPDATE_INTERVAL then
             for _, player in pairs(currentPlayers) do
                 if player ~= G.LP and player.Character then
-                    for _, part in pairs(player.Character:GetDescendants()) do
+                    for _, part in ipairs(EXT.getCharacterParts(player.Character)) do
                         if part:IsA("BasePart") then
                             -- Сохраняем оригинальное значение если ещё не сохранено
                             local key = tostring(part)
@@ -9781,6 +11624,10 @@ State.connections.mainLoop = G.RS.RenderStepped:Connect(function()
         pcall(function() Movement.SmoothFall.Cleanup() end)
         pcall(function() Movement.Speed.Cleanup() end)
         pcall(function() Movement.SafeWalk.Cleanup() end)
+        pcall(function() Movement.WallHop.Cleanup() end)
+        pcall(function() Movement.EdgeJump.Cleanup() end)
+        pcall(function() Movement.StepAssist.Cleanup() end)
+        pcall(function() Movement.FastStop.Cleanup() end)
         pcall(function() Fly_Cleanup() end)
         pcall(function() Clumsy_Cleanup() end)
         pcall(function() restoreWorldTweaks() end)
@@ -9824,12 +11671,19 @@ State.connections.mainLoop = G.RS.RenderStepped:Connect(function()
         pcall(function() EXT.NotifyHolder:Destroy() end)
         pcall(function() EXT.Arraylist:Destroy() end)
         pcall(function() EXT.clearNotifications() end)
+        pcall(function() EXT.closeConfigConfirmationDialog() end)
+        pcall(function() EXT.closeConfigTransferDialog() end)
         pcall(function() EXT.GlowGui:Destroy() end)
         if State.antiAfkConnection then
             pcall(function() State.antiAfkConnection:Disconnect() end)
             State.antiAfkConnection = nil
         end
         
+        for character in pairs(State.characterPartCache) do
+            EXT.releaseCharacterParts(character)
+        end
+        State.moduleScaleAnimations = {}
+
         -- Отключаем все connections
         for name, connection in pairs(State.connections) do
             if connection then
@@ -9851,7 +11705,15 @@ State.connections.mainLoop = G.RS.RenderStepped:Connect(function()
         pcall(function()
             G.RS:UnbindFromRenderStep("Y_AimbotCamera")
         end)
-        FOVCircle:Remove()
+        pcall(function()
+            if FOVCircle then
+                if typeof(FOVCircle.Remove) == "function" then
+                    FOVCircle:Remove()
+                elseif typeof(FOVCircle.Destroy) == "function" then
+                    FOVCircle:Destroy()
+                end
+            end
+        end)
         
         -- Очищаем JumpCircles
         for i = #State.jumpCircles, 1, -1 do
@@ -9901,7 +11763,7 @@ State.connections.mainLoop = G.RS.RenderStepped:Connect(function()
         end
         State.friendsHats = {}
         for _, obj in pairs(workspace:GetChildren()) do
-            if obj.Name:match("^State.chinaHat") or obj.Name:match("^ChinaHatLayer") then
+            if obj.Name:match("^ChinaHat") or obj.Name:match("^ChinaHatLayer") then
                 obj:Destroy()
             end
         end
@@ -9990,7 +11852,7 @@ State.connections.mainLoop = G.RS.RenderStepped:Connect(function()
         restoreWorldTweaks()
         restoreAllViewmodelParts()
         
-        for _, p in pairs(G.Plr:GetPlayers()) do
+        for _, p in pairs(EXT.getPlayers()) do
             if p.Character then
                 if p.Character:FindFirstChild("Y_ESP") then
                     p.Character.Y_ESP:Destroy()
@@ -10033,6 +11895,7 @@ State.connections.mainLoop = G.RS.RenderStepped:Connect(function()
             HudScreenGui:Destroy()
         end
         ScreenGui:Destroy()
+        State.cachedPlayers = {}
     end
 end)
 
@@ -10063,6 +11926,14 @@ end)
 
 -- [[ HOTKEYS & BINDS ]]
 State.connections.inputBegan = G.UIS.InputBegan:Connect(function(input, gp)
+    if EXT.configTransferDialog then
+        if input.KeyCode == Enum.KeyCode.Escape then EXT.closeConfigTransferDialog() end
+        return
+    end
+    if EXT.configConfirmationDialog then
+        if input.KeyCode == Enum.KeyCode.Escape then EXT.closeConfigConfirmationDialog() end
+        return
+    end
     if gp then return end
     
     -- Handle Binding (назначение клавиши) - проверяем первым
@@ -10929,7 +12800,9 @@ Clumsy_Init = function()
     -- Создаем клон персонажа если Visualize включен
     if getgenv().aim_settings.clumsy_visualize then
         pcall(function()
+            State.clumsy.ch.Archivable = true
             State.clumsy.clone = State.clumsy.ch:Clone()
+            if not State.clumsy.clone then return end
             
             -- Удаляем скрипты из клона
             for _, obj in pairs(State.clumsy.clone:GetDescendants()) do
@@ -11044,9 +12917,9 @@ task.spawn(function()
             end
         end
         
-        if s.clumsy_enabled and not State.clumsy.connection then
+        if s.clumsy_enabled and not (State.clumsy and State.clumsy.connection) then
             Clumsy_Init()
-        elseif not s.clumsy_enabled and State.clumsy.connection then
+        elseif not s.clumsy_enabled and (State.clumsy and State.clumsy.connection) then
             Clumsy_Cleanup()
         end
     end
@@ -11056,7 +12929,7 @@ EXT.initAntiAfk()
 EXT.applySavedPositions()
 
 -- Инициализация Infinite Jump
-for _, player in ipairs(G.Plr:GetPlayers()) do
+for _, player in ipairs(EXT.getPlayers()) do
     trackPlayerEsp(player)
 end
 
@@ -11075,6 +12948,10 @@ State.connections.characterAdded = G.LP.CharacterAdded:Connect(function()
     Movement.AirStuck.Init()
     Movement.SmoothFall.Init()
     Movement.Speed.Init()
+    Movement.WallHop.Init()
+    Movement.EdgeJump.Init()
+    Movement.StepAssist.Init()
+    Movement.FastStop.Init()
     Fly_Init()
     restoreAllViewmodelParts()
     
@@ -11145,7 +13022,7 @@ State.connections.spiderLoop = G.RS.Heartbeat:Connect(function()
     end
 end)
 
--- Цикл 3: Air Stuck & Smooth Fall & Speed
+-- Цикл 3: Air Stuck & Smooth Fall & Speed & Movement helpers
 State.connections.asLoop = G.RS.Heartbeat:Connect(function()
     local s = getgenv().aim_settings
     if s.air_stuck_enabled then
@@ -11170,6 +13047,30 @@ State.connections.asLoop = G.RS.Heartbeat:Connect(function()
         if not State.safeWalk or not State.safeWalk.connection then SafeWalk_Init() end
     else
         if State.safeWalk and State.safeWalk.connection then SafeWalk_Cleanup() end
+    end
+    
+    if s.wallhop_enabled then
+        if not State.wallHop or not State.wallHop.connection then WallHop_Init() end
+    else
+        if State.wallHop and State.wallHop.connection then WallHop_Cleanup() end
+    end
+    
+    if s.edge_jump_enabled then
+        if not State.edgeJump or not State.edgeJump.connection then EdgeJump_Init() end
+    else
+        if State.edgeJump and State.edgeJump.connection then EdgeJump_Cleanup() end
+    end
+    
+    if s.step_assist_enabled then
+        if not State.stepAssist or not State.stepAssist.connection then StepAssist_Init() end
+    else
+        if State.stepAssist and State.stepAssist.connection then StepAssist_Cleanup() end
+    end
+    
+    if s.fast_stop_enabled then
+        if not State.fastStop or not State.fastStop.connection then FastStop_Init() end
+    else
+        if State.fastStop and State.fastStop.connection then FastStop_Cleanup() end
     end
 end)
 
@@ -11201,5 +13102,9 @@ if G.LP.Character then
     Movement.AirStuck.Init()
     Movement.SmoothFall.Init()
     Movement.Speed.Init()
+    Movement.WallHop.Init()
+    Movement.EdgeJump.Init()
+    Movement.StepAssist.Init()
+    Movement.FastStop.Init()
     Fly_Init()
 end
